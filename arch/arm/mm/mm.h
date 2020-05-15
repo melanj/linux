@@ -1,9 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifdef CONFIG_MMU
 #include <linux/list.h>
 #include <linux/vmalloc.h>
 
+#include <asm/pgtable.h>
+
 /* the upper-most page table pointer */
 extern pmd_t *top_pmd;
+
+extern int icache_size;
 
 /*
  * 0xffff8000 to 0xffffffff is reserved for any ARM architecture
@@ -65,9 +70,6 @@ extern void __flush_dcache_page(struct address_space *mapping, struct page *page
 #define VM_ARM_MTYPE(mt)		((mt) << 20)
 #define VM_ARM_MTYPE_MASK	(0x1f << 20)
 
-/* consistent regions used by dma_alloc_attrs() */
-#define VM_ARM_DMA_CONSISTENT	0x20000000
-
 
 struct static_vm {
 	struct vm_struct vm;
@@ -93,3 +95,5 @@ extern phys_addr_t arm_lowmem_limit;
 void __init bootmem_init(void);
 void arm_mm_memblock_reserve(void);
 void dma_contiguous_remap(void);
+
+unsigned long __clear_cr(unsigned long mask);

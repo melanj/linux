@@ -1,5 +1,6 @@
-#ifndef _SCHED_PRIO_H
-#define _SCHED_PRIO_H
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _LINUX_SCHED_PRIO_H
+#define _LINUX_SCHED_PRIO_H
 
 #define MAX_NICE	19
 #define MIN_NICE	-20
@@ -41,4 +42,20 @@
 #define TASK_USER_PRIO(p)	USER_PRIO((p)->static_prio)
 #define MAX_USER_PRIO		(USER_PRIO(MAX_PRIO))
 
-#endif /* _SCHED_PRIO_H */
+/*
+ * Convert nice value [19,-20] to rlimit style value [1,40].
+ */
+static inline long nice_to_rlimit(long nice)
+{
+	return (MAX_NICE - nice + 1);
+}
+
+/*
+ * Convert rlimit style value [1,40] to nice value [-20, 19].
+ */
+static inline long rlimit_to_nice(long prio)
+{
+	return (MAX_NICE - prio + 1);
+}
+
+#endif /* _LINUX_SCHED_PRIO_H */

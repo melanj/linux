@@ -1,17 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Altera TSE SGDMA and MSGDMA Linux driver
  * Copyright (C) 2014 Altera Corporation. All rights reserved
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ALTERA_SGDMAHW_H__
@@ -19,16 +8,16 @@
 
 /* SGDMA descriptor structure */
 struct sgdma_descrip {
-	unsigned int	raddr; /* address of data to be read */
-	unsigned int	pad1;
-	unsigned int	waddr;
-	unsigned int    pad2;
-	unsigned int	next;
-	unsigned int	pad3;
-	unsigned short  bytes;
-	unsigned char   rburst;
-	unsigned char	wburst;
-	unsigned short	bytes_xferred;	/* 16 bits, bytes xferred */
+	u32	raddr; /* address of data to be read */
+	u32	pad1;
+	u32	waddr;
+	u32	pad2;
+	u32	next;
+	u32	pad3;
+	u16	bytes;
+	u8	rburst;
+	u8	wburst;
+	u16	bytes_xferred;	/* 16 bits, bytes xferred */
 
 	/* bit 0: error
 	 * bit 1: length error
@@ -39,7 +28,7 @@ struct sgdma_descrip {
 	 * bit 6: reserved
 	 * bit 7: status eop for recv case
 	 */
-	unsigned char	status;
+	u8	status;
 
 	/* bit 0: eop
 	 * bit 1: read_fixed
@@ -47,9 +36,10 @@ struct sgdma_descrip {
 	 * bits 3,4,5,6: Channel (always 0)
 	 * bit 7: hardware owned
 	 */
-	unsigned char	control;
+	u8	control;
 } __packed;
 
+#define SGDMA_DESC_LEN	sizeof(struct sgdma_descrip)
 
 #define SGDMA_STATUS_ERR		BIT(0)
 #define SGDMA_STATUS_LENGTH_ERR		BIT(1)
@@ -101,6 +91,8 @@ struct sgdma_csr {
 	u32	pad3[3];
 };
 
+#define sgdma_csroffs(a) (offsetof(struct sgdma_csr, a))
+#define sgdma_descroffs(a) (offsetof(struct sgdma_descrip, a))
 
 #define SGDMA_STSREG_ERR	BIT(0) /* Error */
 #define SGDMA_STSREG_EOP	BIT(1) /* EOP */

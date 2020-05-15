@@ -109,6 +109,8 @@ struct au1100fb_device {
 	size_t	      		fb_len;
 	dma_addr_t    		fb_phys;
 	int			panel_idx;
+	struct clk		*lcdclk;
+	struct device		*dev;
 };
 
 /********************************************************************/

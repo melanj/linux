@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Andrew Lunn <andrew@lunn.ch>
  * Ben Peddell <klightspeed@killerwolves.net>
  *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 /dts-v1/;
@@ -24,6 +22,7 @@
 
 	chosen {
 		bootargs = "console=ttyS0,115200n8";
+		stdout-path = &uart0;
 	};
 
 	gpio-fan-100-15-35-3 {
@@ -43,6 +42,10 @@
 	status = "okay";
 };
 
-&pcie2 {
+&pciec {
+        status = "okay";
+};
+
+&pcie1 {
 	status = "okay";
 };

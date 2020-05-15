@@ -1,13 +1,8 @@
-/* linux/arch/arm/mach-s3c64xx/cpu.c
- *
- * Copyright 2009 Simtec Electronics
- *	Ben Dooks <ben@simtec.co.uk>
- *	http://armlinux.simtec.co.uk/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
-*/
+// SPDX-License-Identifier: GPL-2.0
+//
+// Copyright 2009 Simtec Electronics
+//	Ben Dooks <ben@simtec.co.uk>
+//	http://armlinux.simtec.co.uk/
 
 /*
  * NOTE: Code in this file is not used when booting with Device Tree support.
@@ -39,12 +34,11 @@
 
 #include <plat/cpu.h>
 #include <plat/devs.h>
-#include <plat/clock.h>
 #include <plat/sdhci.h>
 #include <plat/iic-core.h>
-#include <plat/onenand-core.h>
 
 #include "common.h"
+#include "onenand-core.h"
 
 void __init s3c6400_map_io(void)
 {
@@ -82,7 +76,7 @@ static struct device s3c6400_dev = {
 static int __init s3c6400_core_init(void)
 {
 	/* Not applicable when using DT. */
-	if (of_have_populated_dt())
+	if (of_have_populated_dt() || soc_is_s3c64xx())
 		return 0;
 
 	return subsys_system_register(&s3c6400_subsys, NULL);

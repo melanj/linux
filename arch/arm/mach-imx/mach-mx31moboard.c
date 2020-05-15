@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 2008 Valentin Longchamp, EPFL Mobots group
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/delay.h>
@@ -47,6 +38,7 @@
 #include "board-mx31moboard.h"
 #include "common.h"
 #include "devices-imx31.h"
+#include "ehci.h"
 #include "hardware.h"
 #include "iomux-mx3.h"
 #include "ulpi.h"
@@ -151,14 +143,8 @@ static const struct imxi2c_platform_data moboard_i2c1_data __initconst = {
 	.bitrate = 100000,
 };
 
-static int moboard_spi1_cs[] = {
-	MXC_SPI_CS(0),
-	MXC_SPI_CS(2),
-};
-
 static const struct spi_imx_master moboard_spi1_pdata __initconst = {
-	.chipselect	= moboard_spi1_cs,
-	.num_chipselect	= ARRAY_SIZE(moboard_spi1_cs),
+	.num_chipselect	= 3,
 };
 
 static struct regulator_consumer_supply sdhc_consumers[] = {
@@ -301,13 +287,8 @@ static struct spi_board_info moboard_spi_board_info[] __initdata = {
 	},
 };
 
-static int moboard_spi2_cs[] = {
-	MXC_SPI_CS(1),
-};
-
 static const struct spi_imx_master moboard_spi2_pdata __initconst = {
-	.chipselect	= moboard_spi2_cs,
-	.num_chipselect	= ARRAY_SIZE(moboard_spi2_cs),
+	.num_chipselect	= 2,
 };
 
 #define SDHC1_CD IOMUX_TO_GPIO(MX31_PIN_ATA_CS0)
@@ -434,10 +415,8 @@ static int __init moboard_usbh2_init(void)
 		return -ENODEV;
 
 	pdev = imx31_add_mxc_ehci_hs(2, &usbh2_pdata);
-	if (IS_ERR(pdev))
-		return PTR_ERR(pdev);
 
-	return 0;
+	return PTR_ERR_OR_ZERO(pdev);
 }
 
 static const struct gpio_led mx31moboard_leds[] __initconst = {
@@ -476,7 +455,7 @@ static phys_addr_t mx3_camera_base __initdata;
 
 static int __init mx31moboard_init_cam(void)
 {
-	int dma, ret = -ENOMEM;
+	int ret;
 	struct platform_device *pdev;
 
 	imx31_add_ipu_core();
@@ -485,11 +464,10 @@ static int __init mx31moboard_init_cam(void)
 	if (IS_ERR(pdev))
 		return PTR_ERR(pdev);
 
-	dma = dma_declare_coherent_memory(&pdev->dev,
-					mx3_camera_base, mx3_camera_base,
-					MX3_CAMERA_BUF_SIZE,
-					DMA_MEMORY_MAP | DMA_MEMORY_EXCLUSIVE);
-	if (!(dma & DMA_MEMORY_MAP))
+	ret = dma_declare_coherent_memory(&pdev->dev,
+					  mx3_camera_base, mx3_camera_base,
+					  MX3_CAMERA_BUF_SIZE);
+	if (ret)
 		goto err;
 
 	ret = platform_device_add(pdev);
@@ -510,7 +488,7 @@ static void mx31moboard_poweroff(void)
 
 	mxc_iomux_mode(MX31_PIN_WATCHDOG_RST__WATCHDOG_RST);
 
-	__raw_writew(1 << 6 | 1 << 2, MX31_IO_ADDRESS(MX31_WDOG_BASE_ADDR));
+	imx_writew(1 << 6 | 1 << 2, MX31_IO_ADDRESS(MX31_WDOG_BASE_ADDR));
 }
 
 static int mx31moboard_baseboard;
@@ -527,11 +505,9 @@ static void __init mx31moboard_init(void)
 		"moboard");
 
 	platform_add_devices(devices, ARRAY_SIZE(devices));
-	gpio_led_register_device(-1, &mx31moboard_led_pdata);
 
 	imx31_add_imx2_wdt();
 
-	moboard_uart0_init();
 	imx31_add_imx_uart0(&uart0_pdata);
 	imx31_add_imx_uart4(&uart4_pdata);
 
@@ -540,6 +516,19 @@ static void __init mx31moboard_init(void)
 
 	imx31_add_spi_imx1(&moboard_spi1_pdata);
 	imx31_add_spi_imx2(&moboard_spi2_pdata);
+
+	mx31moboard_init_cam();
+
+	imx31_add_imx_ssi(0, &moboard_ssi_pdata);
+
+	pm_power_off = mx31moboard_poweroff;
+}
+
+static void __init mx31moboard_late(void)
+{
+	gpio_led_register_device(-1, &mx31moboard_led_pdata);
+
+	moboard_uart0_init();
 
 	gpio_request(IOMUX_TO_GPIO(MX31_PIN_GPIO1_3), "pmic-irq");
 	gpio_direction_input(IOMUX_TO_GPIO(MX31_PIN_GPIO1_3));
@@ -550,17 +539,10 @@ static void __init mx31moboard_init(void)
 
 	imx31_add_mxc_mmc(0, &sdhc1_pdata);
 
-	mx31moboard_init_cam();
-
 	usb_xcvr_reset();
-
 	moboard_usbh2_init();
 
-	imx31_add_imx_ssi(0, &moboard_ssi_pdata);
-
 	imx_add_platform_device("imx_mc13783", 0, NULL, 0, NULL, 0);
-
-	pm_power_off = mx31moboard_poweroff;
 
 	switch (mx31moboard_baseboard) {
 	case MX31NOBOARD:
@@ -600,8 +582,8 @@ MACHINE_START(MX31MOBOARD, "EPFL Mobots mx31moboard")
 	.map_io = mx31_map_io,
 	.init_early = imx31_init_early,
 	.init_irq = mx31_init_irq,
-	.handle_irq = imx31_handle_irq,
 	.init_time	= mx31moboard_timer_init,
 	.init_machine = mx31moboard_init,
+	.init_late	= mx31moboard_late,
 	.restart	= mxc_restart,
 MACHINE_END

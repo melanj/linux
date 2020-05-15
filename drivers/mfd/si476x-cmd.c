@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/mfd/si476x-cmd.c -- Subroutines implementing command
  * protocol of si476x series of chips
@@ -6,16 +7,6 @@
  * Copyright (C) 2013 Andrey Smirnov
  *
  * Author: Andrey Smirnov <andrew.smirnov@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
  */
 
 #include <linux/module.h>
@@ -1228,8 +1219,8 @@ static int si476x_core_cmd_fm_rsq_status_a10(struct si476x_core *core,
 }
 
 static int si476x_core_cmd_fm_rsq_status_a20(struct si476x_core *core,
-					     struct si476x_rsq_status_args *rsqargs,
-					     struct si476x_rsq_status_report *report)
+				     struct si476x_rsq_status_args *rsqargs,
+				     struct si476x_rsq_status_report *report)
 {
 	int err;
 	u8       resp[CMD_FM_RSQ_STATUS_A10_NRESP];
@@ -1434,10 +1425,10 @@ typedef int (*tune_freq_func_t) (struct si476x_core *core,
 				 struct si476x_tune_freq_args *tuneargs);
 
 static struct {
-	int (*power_up) (struct si476x_core *,
-			 struct si476x_power_up_args *);
-	int (*power_down) (struct si476x_core *,
-			   struct si476x_power_down_args *);
+	int (*power_up)(struct si476x_core *,
+			struct si476x_power_up_args *);
+	int (*power_down)(struct si476x_core *,
+			  struct si476x_power_down_args *);
 
 	tune_freq_func_t fm_tune_freq;
 	tune_freq_func_t am_tune_freq;

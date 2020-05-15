@@ -13,11 +13,10 @@
 
 #include <linux/clocksource.h>
 #include <linux/of_address.h>
-#include <linux/of_platform.h>
 
 #include <asm/mach/arch.h>
 
-#include "kona.h"
+#include "kona_l2_cache.h"
 
 #define SECWDOG_OFFSET			0x00000000
 #define SECWDOG_RESERVED_MASK		0xe2000000
@@ -39,6 +38,7 @@ static void bcm281xx_restart(enum reboot_mode mode, const char *cmd)
 		return;
 	}
 	base = of_iomap(np_wdog, 0);
+	of_node_put(np_wdog);
 	if (!base) {
 		pr_emerg("Couldn't map brcm,kona-wdt\n");
 		return;
@@ -58,8 +58,6 @@ static void bcm281xx_restart(enum reboot_mode mode, const char *cmd)
 
 static void __init bcm281xx_init(void)
 {
-	of_platform_populate(NULL, of_default_bus_match_table, NULL,
-		&platform_bus);
 	kona_l2_cache_init();
 }
 

@@ -1,11 +1,13 @@
 /*
  * QLogic Fibre Channel HBA Driver
- * Copyright (c)  2003-2013 QLogic Corporation
+ * Copyright (c)  2003-2014 QLogic Corporation
  *
  * See LICENSE.qla2xxx for copyright and licensing details.
  */
 #ifndef __QLA_MR_H
 #define __QLA_MR_H
+
+#include "qla_dsd.h"
 
 /*
  * The PCI VendorID and DeviceID for our board.
@@ -46,8 +48,7 @@ struct cmd_type_7_fx00 {
 	uint8_t fcp_cdb[MAX_CMDSZ];	/* SCSI command words. */
 	__le32 byte_count;		/* Total byte count. */
 
-	uint32_t dseg_0_address[2];	/* Data segment 0 address. */
-	uint32_t dseg_0_len;		/* Data segment 0 length. */
+	struct dsd64 dsd;
 };
 
 #define	STATUS_TYPE_FX00	0x01		/* Status entry. */
@@ -176,10 +177,8 @@ struct fxdisc_entry_fx00 {
 	uint8_t flags;
 	uint8_t reserved_1;
 
-	__le32 dseg_rq_address[2];	/* Data segment 0 address. */
-	__le32 dseg_rq_len;		/* Data segment 0 length. */
-	__le32 dseg_rsp_address[2];	/* Data segment 1 address. */
-	__le32 dseg_rsp_len;		/* Data segment 1 length. */
+	struct dsd64 dseg_rq;
+	struct dsd64 dseg_rsp;
 
 	__le32 dataword;
 	__le32 adapid;
@@ -351,6 +350,7 @@ struct config_info_data {
 #define SOC_FABRIC_RST_CONTROL_REG       0x0020840
 #define SOC_FABRIC_CONTROL_REG           0x0020200
 #define SOC_FABRIC_CONFIG_REG            0x0020204
+#define SOC_PWR_MANAGEMENT_PWR_DOWN_REG  0x001820C
 
 #define SOC_INTERRUPT_SOURCE_I_CONTROL_REG     0x0020B00
 #define SOC_CORE_TIMER_REG                     0x0021850

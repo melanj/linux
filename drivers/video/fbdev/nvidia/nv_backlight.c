@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backlight code for nVidia based graphic cards
  *
  * Copyright 2004 Antonino Daplas <adaplas@pol.net>
  * Copyright (c) 2006 Michael Hanselmann <linux-kernel@hansmi.ch>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/backlight.h>
@@ -82,13 +79,7 @@ static int nvidia_bl_update_status(struct backlight_device *bd)
 	return 0;
 }
 
-static int nvidia_bl_get_brightness(struct backlight_device *bd)
-{
-	return bd->props.brightness;
-}
-
 static const struct backlight_ops nvidia_bl_ops = {
-	.get_brightness = nvidia_bl_get_brightness,
 	.update_status	= nvidia_bl_update_status,
 };
 
@@ -131,8 +122,6 @@ void nvidia_bl_init(struct nvidia_par *par)
 	backlight_update_status(bd);
 
 	printk("nvidia: Backlight initialized (%s)\n", name);
-
-	return;
 
 error:
 	return;

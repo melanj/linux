@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *    Copyright IBM Corp. 2004, 2011
  *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>,
@@ -12,11 +13,12 @@
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
 #include <linux/profile.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/ftrace.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include <linux/init.h>
 #include <linux/cpu.h>
 #include <linux/irq.h>
 #include <asm/irq_regs.h>
@@ -24,12 +26,14 @@
 #include <asm/lowcore.h>
 #include <asm/irq.h>
 #include <asm/hw_irq.h>
+#include <asm/stacktrace.h>
 #include "entry.h"
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct irq_stat, irq_stat);
 EXPORT_PER_CPU_SYMBOL_GPL(irq_stat);
 
 struct irq_class {
+	int irq;
 	char *name;
 	char *desc;
 };
@@ -45,9 +49,9 @@ struct irq_class {
  * up with having a sum which accounts each interrupt twice.
  */
 static const struct irq_class irqclass_main_desc[NR_IRQS_BASE] = {
-	[EXT_INTERRUPT]  = {.name = "EXT"},
-	[IO_INTERRUPT]	 = {.name = "I/O"},
-	[THIN_INTERRUPT] = {.name = "AIO"},
+	{.irq = EXT_INTERRUPT,	.name = "EXT"},
+	{.irq = IO_INTERRUPT,	.name = "I/O"},
+	{.irq = THIN_INTERRUPT, .name = "AIO"},
 };
 
 /*
@@ -55,48 +59,41 @@ static const struct irq_class irqclass_main_desc[NR_IRQS_BASE] = {
  * /proc/interrupts.
  * In addition this list contains non external / I/O events like NMIs.
  */
-static const struct irq_class irqclass_sub_desc[NR_ARCH_IRQS] = {
-	[IRQEXT_CLK] = {.name = "CLK", .desc = "[EXT] Clock Comparator"},
-	[IRQEXT_EXC] = {.name = "EXC", .desc = "[EXT] External Call"},
-	[IRQEXT_EMS] = {.name = "EMS", .desc = "[EXT] Emergency Signal"},
-	[IRQEXT_TMR] = {.name = "TMR", .desc = "[EXT] CPU Timer"},
-	[IRQEXT_TLA] = {.name = "TAL", .desc = "[EXT] Timing Alert"},
-	[IRQEXT_PFL] = {.name = "PFL", .desc = "[EXT] Pseudo Page Fault"},
-	[IRQEXT_DSD] = {.name = "DSD", .desc = "[EXT] DASD Diag"},
-	[IRQEXT_VRT] = {.name = "VRT", .desc = "[EXT] Virtio"},
-	[IRQEXT_SCP] = {.name = "SCP", .desc = "[EXT] Service Call"},
-	[IRQEXT_IUC] = {.name = "IUC", .desc = "[EXT] IUCV"},
-	[IRQEXT_CMS] = {.name = "CMS", .desc = "[EXT] CPU-Measurement: Sampling"},
-	[IRQEXT_CMC] = {.name = "CMC", .desc = "[EXT] CPU-Measurement: Counter"},
-	[IRQEXT_CMR] = {.name = "CMR", .desc = "[EXT] CPU-Measurement: RI"},
-	[IRQIO_CIO]  = {.name = "CIO", .desc = "[I/O] Common I/O Layer Interrupt"},
-	[IRQIO_QAI]  = {.name = "QAI", .desc = "[I/O] QDIO Adapter Interrupt"},
-	[IRQIO_DAS]  = {.name = "DAS", .desc = "[I/O] DASD"},
-	[IRQIO_C15]  = {.name = "C15", .desc = "[I/O] 3215"},
-	[IRQIO_C70]  = {.name = "C70", .desc = "[I/O] 3270"},
-	[IRQIO_TAP]  = {.name = "TAP", .desc = "[I/O] Tape"},
-	[IRQIO_VMR]  = {.name = "VMR", .desc = "[I/O] Unit Record Devices"},
-	[IRQIO_LCS]  = {.name = "LCS", .desc = "[I/O] LCS"},
-	[IRQIO_CLW]  = {.name = "CLW", .desc = "[I/O] CLAW"},
-	[IRQIO_CTC]  = {.name = "CTC", .desc = "[I/O] CTC"},
-	[IRQIO_APB]  = {.name = "APB", .desc = "[I/O] AP Bus"},
-	[IRQIO_ADM]  = {.name = "ADM", .desc = "[I/O] EADM Subchannel"},
-	[IRQIO_CSC]  = {.name = "CSC", .desc = "[I/O] CHSC Subchannel"},
-	[IRQIO_PCI]  = {.name = "PCI", .desc = "[I/O] PCI Interrupt" },
-	[IRQIO_MSI]  = {.name = "MSI", .desc = "[I/O] MSI Interrupt" },
-	[IRQIO_VIR]  = {.name = "VIR", .desc = "[I/O] Virtual I/O Devices"},
-	[IRQIO_VAI]  = {.name = "VAI", .desc = "[I/O] Virtual I/O Devices AI"},
-	[NMI_NMI]    = {.name = "NMI", .desc = "[NMI] Machine Check"},
-	[CPU_RST]    = {.name = "RST", .desc = "[CPU] CPU Restart"},
+static const struct irq_class irqclass_sub_desc[] = {
+	{.irq = IRQEXT_CLK, .name = "CLK", .desc = "[EXT] Clock Comparator"},
+	{.irq = IRQEXT_EXC, .name = "EXC", .desc = "[EXT] External Call"},
+	{.irq = IRQEXT_EMS, .name = "EMS", .desc = "[EXT] Emergency Signal"},
+	{.irq = IRQEXT_TMR, .name = "TMR", .desc = "[EXT] CPU Timer"},
+	{.irq = IRQEXT_TLA, .name = "TAL", .desc = "[EXT] Timing Alert"},
+	{.irq = IRQEXT_PFL, .name = "PFL", .desc = "[EXT] Pseudo Page Fault"},
+	{.irq = IRQEXT_DSD, .name = "DSD", .desc = "[EXT] DASD Diag"},
+	{.irq = IRQEXT_VRT, .name = "VRT", .desc = "[EXT] Virtio"},
+	{.irq = IRQEXT_SCP, .name = "SCP", .desc = "[EXT] Service Call"},
+	{.irq = IRQEXT_IUC, .name = "IUC", .desc = "[EXT] IUCV"},
+	{.irq = IRQEXT_CMS, .name = "CMS", .desc = "[EXT] CPU-Measurement: Sampling"},
+	{.irq = IRQEXT_CMC, .name = "CMC", .desc = "[EXT] CPU-Measurement: Counter"},
+	{.irq = IRQEXT_FTP, .name = "FTP", .desc = "[EXT] HMC FTP Service"},
+	{.irq = IRQIO_CIO,  .name = "CIO", .desc = "[I/O] Common I/O Layer Interrupt"},
+	{.irq = IRQIO_DAS,  .name = "DAS", .desc = "[I/O] DASD"},
+	{.irq = IRQIO_C15,  .name = "C15", .desc = "[I/O] 3215"},
+	{.irq = IRQIO_C70,  .name = "C70", .desc = "[I/O] 3270"},
+	{.irq = IRQIO_TAP,  .name = "TAP", .desc = "[I/O] Tape"},
+	{.irq = IRQIO_VMR,  .name = "VMR", .desc = "[I/O] Unit Record Devices"},
+	{.irq = IRQIO_LCS,  .name = "LCS", .desc = "[I/O] LCS"},
+	{.irq = IRQIO_CTC,  .name = "CTC", .desc = "[I/O] CTC"},
+	{.irq = IRQIO_ADM,  .name = "ADM", .desc = "[I/O] EADM Subchannel"},
+	{.irq = IRQIO_CSC,  .name = "CSC", .desc = "[I/O] CHSC Subchannel"},
+	{.irq = IRQIO_VIR,  .name = "VIR", .desc = "[I/O] Virtual I/O Devices"},
+	{.irq = IRQIO_QAI,  .name = "QAI", .desc = "[AIO] QDIO Adapter Interrupt"},
+	{.irq = IRQIO_APB,  .name = "APB", .desc = "[AIO] AP Bus"},
+	{.irq = IRQIO_PCF,  .name = "PCF", .desc = "[AIO] PCI Floating Interrupt"},
+	{.irq = IRQIO_PCD,  .name = "PCD", .desc = "[AIO] PCI Directed Interrupt"},
+	{.irq = IRQIO_MSI,  .name = "MSI", .desc = "[AIO] MSI Interrupt"},
+	{.irq = IRQIO_VAI,  .name = "VAI", .desc = "[AIO] Virtual I/O Devices AI"},
+	{.irq = IRQIO_GAL,  .name = "GAL", .desc = "[AIO] GIB Alert"},
+	{.irq = NMI_NMI,    .name = "NMI", .desc = "[NMI] Machine Check"},
+	{.irq = CPU_RST,    .name = "RST", .desc = "[CPU] CPU Restart"},
 };
-
-void __init init_IRQ(void)
-{
-	irq_reserve_irqs(0, THIN_INTERRUPT);
-	init_cio_interrupts();
-	init_airq_interrupts();
-	init_ext_interrupts();
-}
 
 void do_IRQ(struct pt_regs *regs, int irq)
 {
@@ -104,7 +101,8 @@ void do_IRQ(struct pt_regs *regs, int irq)
 
 	old_regs = set_irq_regs(regs);
 	irq_enter();
-	if (S390_lowcore.int_clock >= S390_lowcore.clock_comparator)
+	if (tod_after_eq(S390_lowcore.int_clock,
+			 S390_lowcore.clock_comparator))
 		/* Serve timer interrupts first. */
 		clock_comparator_work();
 	generic_handle_irq(irq);
@@ -112,38 +110,69 @@ void do_IRQ(struct pt_regs *regs, int irq)
 	set_irq_regs(old_regs);
 }
 
+static void show_msi_interrupt(struct seq_file *p, int irq)
+{
+	struct irq_desc *desc;
+	unsigned long flags;
+	int cpu;
+
+	irq_lock_sparse();
+	desc = irq_to_desc(irq);
+	if (!desc)
+		goto out;
+
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	seq_printf(p, "%3d: ", irq);
+	for_each_online_cpu(cpu)
+		seq_printf(p, "%10u ", kstat_irqs_cpu(irq, cpu));
+
+	if (desc->irq_data.chip)
+		seq_printf(p, " %8s", desc->irq_data.chip->name);
+
+	if (desc->action)
+		seq_printf(p, "  %s", desc->action->name);
+
+	seq_putc(p, '\n');
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+out:
+	irq_unlock_sparse();
+}
+
 /*
  * show_interrupts is needed by /proc/interrupts.
  */
 int show_interrupts(struct seq_file *p, void *v)
 {
-	int irq = *(loff_t *) v;
-	int cpu;
+	int index = *(loff_t *) v;
+	int cpu, irq;
 
 	get_online_cpus();
-	if (irq == 0) {
+	if (index == 0) {
 		seq_puts(p, "           ");
 		for_each_online_cpu(cpu)
-			seq_printf(p, "CPU%d       ", cpu);
+			seq_printf(p, "CPU%-8d", cpu);
 		seq_putc(p, '\n');
-		goto out;
 	}
-	if (irq < NR_IRQS) {
-		if (irq >= NR_IRQS_BASE)
-			goto out;
-		seq_printf(p, "%s: ", irqclass_main_desc[irq].name);
+	if (index < NR_IRQS_BASE) {
+		seq_printf(p, "%s: ", irqclass_main_desc[index].name);
+		irq = irqclass_main_desc[index].irq;
 		for_each_online_cpu(cpu)
 			seq_printf(p, "%10u ", kstat_irqs_cpu(irq, cpu));
 		seq_putc(p, '\n');
 		goto out;
 	}
-	for (irq = 0; irq < NR_ARCH_IRQS; irq++) {
-		seq_printf(p, "%s: ", irqclass_sub_desc[irq].name);
+	if (index < nr_irqs) {
+		show_msi_interrupt(p, index);
+		goto out;
+	}
+	for (index = 0; index < NR_ARCH_IRQS; index++) {
+		seq_printf(p, "%s: ", irqclass_sub_desc[index].name);
+		irq = irqclass_sub_desc[index].irq;
 		for_each_online_cpu(cpu)
 			seq_printf(p, "%10u ",
 				   per_cpu(irq_stat, cpu).irqs[irq]);
-		if (irqclass_sub_desc[irq].desc)
-			seq_printf(p, "  %s", irqclass_sub_desc[irq].desc);
+		if (irqclass_sub_desc[index].desc)
+			seq_printf(p, "  %s", irqclass_sub_desc[index].desc);
 		seq_putc(p, '\n');
 	}
 out:
@@ -151,9 +180,9 @@ out:
 	return 0;
 }
 
-int arch_show_interrupts(struct seq_file *p, int prec)
+unsigned int arch_dynirq_lower_bound(unsigned int from)
 {
-	return 0;
+	return from < NR_IRQS_BASE ? NR_IRQS_BASE : from;
 }
 
 /*
@@ -163,21 +192,11 @@ void do_softirq_own_stack(void)
 {
 	unsigned long old, new;
 
-	/* Get current stack pointer. */
-	asm volatile("la %0,0(15)" : "=a" (old));
+	old = current_stack_pointer();
 	/* Check against async. stack address range. */
 	new = S390_lowcore.async_stack;
-	if (((new - old) >> (PAGE_SHIFT + THREAD_ORDER)) != 0) {
-		/* Need to switch to the async. stack. */
-		new -= STACK_FRAME_OVERHEAD;
-		((struct stack_frame *) new)->back_chain = old;
-		asm volatile("   la    15,0(%0)\n"
-			     "   basr  14,%2\n"
-			     "   la    15,0(%1)\n"
-			     : : "a" (new), "a" (old),
-			         "a" (__do_softirq)
-			     : "0", "1", "2", "3", "4", "5", "14",
-			       "cc", "memory" );
+	if (((new - old) >> (PAGE_SHIFT + THREAD_SIZE_ORDER)) != 0) {
+		CALL_ON_STACK(__do_softirq, new, 0);
 	} else {
 		/* We are already on the async stack. */
 		__do_softirq();
@@ -254,7 +273,7 @@ static irqreturn_t do_ext_interrupt(int irq, void *dummy)
 
 	ext_code = *(struct ext_code *) &regs->int_code;
 	if (ext_code.code != EXT_IRQ_CLK_COMP)
-		__get_cpu_var(s390_idle).nohz_delay = 1;
+		set_cpu_flag(CIF_NOHZ_DELAY);
 
 	index = ext_hash(ext_code.code);
 	rcu_read_lock();
@@ -267,12 +286,7 @@ static irqreturn_t do_ext_interrupt(int irq, void *dummy)
 	return IRQ_HANDLED;
 }
 
-static struct irqaction external_interrupt = {
-	.name	 = "EXT",
-	.handler = do_ext_interrupt,
-};
-
-void __init init_ext_interrupts(void)
+static void __init init_ext_interrupts(void)
 {
 	int idx;
 
@@ -281,7 +295,16 @@ void __init init_ext_interrupts(void)
 
 	irq_set_chip_and_handler(EXT_INTERRUPT,
 				 &dummy_irq_chip, handle_percpu_irq);
-	setup_irq(EXT_INTERRUPT, &external_interrupt);
+	if (request_irq(EXT_INTERRUPT, do_ext_interrupt, 0, "EXT", NULL))
+		panic("Failed to register EXT interrupt\n");
+}
+
+void __init init_IRQ(void)
+{
+	BUILD_BUG_ON(ARRAY_SIZE(irqclass_sub_desc) != NR_ARCH_IRQS);
+	init_cio_interrupts();
+	init_airq_interrupts();
+	init_ext_interrupts();
 }
 
 static DEFINE_SPINLOCK(irq_subclass_lock);

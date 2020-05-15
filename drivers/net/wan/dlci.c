@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * DLCI		Implementation of Frame Relay protocol for Linux, according to
  *		RFC 1490.  This generic device provides en/decapsulation for an
@@ -21,11 +22,6 @@
  *		0.25	Mike McLagan	Converted to use SIOC IOCTL calls
  *		0.30	Jim Freeman	Fixed to allow IPX traffic
  *		0.35	Michael Elizabeth	Fixed incorrect memcpy_fromfs
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -52,7 +48,7 @@
 
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 static const char version[] = "DLCI driver v0.35, 4 Jan 1997, mike.mclagan@linux.org";
 
@@ -192,8 +188,10 @@ static netdev_tx_t dlci_transmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dlci_local *dlp = netdev_priv(dev);
 
-	if (skb)
-		dlp->slave->netdev_ops->ndo_start_xmit(skb, dlp->slave);
+	if (skb) {
+		struct netdev_queue *txq = skb_get_tx_queue(dev, skb);
+		netdev_start_xmit(skb, dlp->slave, txq, false);
+	}
 	return NETDEV_TX_OK;
 }
 
@@ -255,7 +253,6 @@ static int dlci_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 				return -EINVAL;
 
 			return dlci_config(dev, ifr->ifr_data, cmd == DLCI_GET_CONF);
-			break;
 
 		default: 
 			return -EOPNOTSUPP;
@@ -327,8 +324,8 @@ static int dlci_add(struct dlci_add *dlci)
 		goto err1;
 
 	/* create device name */
-	master = alloc_netdev( sizeof(struct dlci_local), "dlci%d",
-			      dlci_setup);
+	master = alloc_netdev(sizeof(struct dlci_local), "dlci%d",
+			      NET_NAME_UNKNOWN, dlci_setup);
 	if (!master) {
 		err = -ENOMEM;
 		goto err1;
@@ -474,7 +471,7 @@ static void dlci_setup(struct net_device *dev)
 	dev->flags		= 0;
 	dev->header_ops		= &dlci_header_ops;
 	dev->netdev_ops		= &dlci_netdev_ops;
-	dev->destructor		= free_netdev;
+	dev->needs_free_netdev	= true;
 
 	dlp->receive		= dlci_receive;
 

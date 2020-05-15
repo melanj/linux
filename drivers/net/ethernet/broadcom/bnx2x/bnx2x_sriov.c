@@ -1,20 +1,22 @@
-/* bnx2x_sriov.c: Broadcom Everest network driver.
+/* bnx2x_sriov.c: QLogic Everest network driver.
  *
  * Copyright 2009-2013 Broadcom Corporation
+ * Copyright 2014 QLogic Corporation
+ * All rights reserved
  *
- * Unless you and Broadcom execute a separate written software license
+ * Unless you and QLogic execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
  * under the terms of the GNU General Public License version 2, available
  * at http://www.gnu.org/licenses/old-licenses/gpl-2.0.html (the "GPL").
  *
  * Notwithstanding the above, under no circumstances may you combine this
- * software in any way with any other Broadcom software provided under a
- * license other than the GPL, without Broadcom's express prior written
+ * software in any way with any other QLogic software provided under a
+ * license other than the GPL, without QLogic's express prior written
  * consent.
  *
- * Maintained by: Eilon Greenstein <eilong@broadcom.com>
- * Written by: Shmulik Ravid <shmulikr@broadcom.com>
- *	       Ariel Elior <ariele@broadcom.com>
+ * Maintained by: Ariel Elior <ariel.elior@qlogic.com>
+ * Written by: Shmulik Ravid
+ *	       Ariel Elior <ariel.elior@qlogic.com>
  *
  */
 #include "bnx2x.h"
@@ -23,6 +25,11 @@
 #include "bnx2x_sp.h"
 #include <linux/crc32.h>
 #include <linux/if_vlan.h>
+
+static int bnx2x_vf_op_prep(struct bnx2x *bp, int vfidx,
+			    struct bnx2x_virtf **vf,
+			    struct pf_vf_bulletin_content **bulletin,
+			    bool test_queue);
 
 /* General service functions */
 static void storm_memset_vf_to_pf(struct bnx2x *bp, u16 abs_fid,
@@ -93,13 +100,11 @@ static void bnx2x_vf_igu_ack_sb(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	DP(NETIF_MSG_HW, "write 0x%08x to IGU(via GRC) addr 0x%x\n",
 	   cmd_data.sb_id_and_flags, igu_addr_data);
 	REG_WR(bp, igu_addr_data, cmd_data.sb_id_and_flags);
-	mmiowb();
 	barrier();
 
 	DP(NETIF_MSG_HW, "write 0x%08x to IGU(via GRC) addr 0x%x\n",
 	   ctl, igu_addr_ctl);
 	REG_WR(bp, igu_addr_ctl, ctl);
-	mmiowb();
 	barrier();
 }
 
@@ -188,15 +193,8 @@ void bnx2x_vfop_qctor_prep(struct bnx2x *bp,
 	/* Setup-op general parameters */
 	setup_p->gen_params.spcl_id = vf->sp_cl_id;
 	setup_p->gen_params.stat_id = vfq_stat_id(vf, q);
+	setup_p->gen_params.fp_hsi = vf->fp_hsi;
 
-	/* Setup-op pause params:
-	 * Nothing to do, the pause thresholds are set by default to 0 which
-	 * effectively turns off the feature for this queue. We don't want
-	 * one queue (VF) to interfering with another queue (another VF)
-	 */
-	if (vf->cfg_flags & VF_CFG_FW_FC)
-		BNX2X_ERR("No support for pause to VFs (abs_vfid: %d)\n",
-			  vf->abs_vfid);
 	/* Setup-op flags:
 	 * collect statistics, zero statistics, local-switching, security,
 	 * OV for Flex10, RSS and MCAST for leading
@@ -209,7 +207,10 @@ void bnx2x_vfop_qctor_prep(struct bnx2x *bp,
 	 */
 	__set_bit(BNX2X_Q_FLG_TX_SWITCH, &setup_p->flags);
 	__set_bit(BNX2X_Q_FLG_TX_SEC, &setup_p->flags);
-	__set_bit(BNX2X_Q_FLG_ANTI_SPOOF, &setup_p->flags);
+	if (vf->spoofchk)
+		__set_bit(BNX2X_Q_FLG_ANTI_SPOOF, &setup_p->flags);
+	else
+		__clear_bit(BNX2X_Q_FLG_ANTI_SPOOF, &setup_p->flags);
 
 	/* Setup-op rx parameters */
 	if (test_bit(BNX2X_Q_TYPE_HAS_RX, &q_type)) {
@@ -352,22 +353,24 @@ static inline void bnx2x_vf_vlan_credit(struct bnx2x *bp,
 }
 
 static int bnx2x_vf_vlan_mac_clear(struct bnx2x *bp, struct bnx2x_virtf *vf,
-				   int qid, bool drv_only, bool mac)
+				   int qid, bool drv_only, int type)
 {
 	struct bnx2x_vlan_mac_ramrod_params ramrod;
 	int rc;
 
 	DP(BNX2X_MSG_IOV, "vf[%d] - deleting all %s\n", vf->abs_vfid,
-	   mac ? "MACs" : "VLANs");
+			  (type == BNX2X_VF_FILTER_VLAN_MAC) ? "VLAN-MACs" :
+			  (type == BNX2X_VF_FILTER_MAC) ? "MACs" : "VLANs");
 
 	/* Prepare ramrod params */
 	memset(&ramrod, 0, sizeof(struct bnx2x_vlan_mac_ramrod_params));
-	if (mac) {
+	if (type == BNX2X_VF_FILTER_VLAN_MAC) {
+		set_bit(BNX2X_ETH_MAC, &ramrod.user_req.vlan_mac_flags);
+		ramrod.vlan_mac_obj = &bnx2x_vfq(vf, qid, vlan_mac_obj);
+	} else if (type == BNX2X_VF_FILTER_MAC) {
 		set_bit(BNX2X_ETH_MAC, &ramrod.user_req.vlan_mac_flags);
 		ramrod.vlan_mac_obj = &bnx2x_vfq(vf, qid, mac_obj);
 	} else {
-		set_bit(BNX2X_DONT_CONSUME_CAM_CREDIT,
-			&ramrod.user_req.vlan_mac_flags);
 		ramrod.vlan_mac_obj = &bnx2x_vfq(vf, qid, vlan_obj);
 	}
 	ramrod.user_req.cmd = BNX2X_VLAN_MAC_DEL;
@@ -385,13 +388,10 @@ static int bnx2x_vf_vlan_mac_clear(struct bnx2x *bp, struct bnx2x_virtf *vf,
 					     &ramrod.ramrod_flags);
 	if (rc) {
 		BNX2X_ERR("Failed to delete all %s\n",
-			  mac ? "MACs" : "VLANs");
+			  (type == BNX2X_VF_FILTER_VLAN_MAC) ? "VLAN-MACs" :
+			  (type == BNX2X_VF_FILTER_MAC) ? "MACs" : "VLANs");
 		return rc;
 	}
-
-	/* Clear the vlan counters */
-	if (!mac)
-		atomic_set(&bnx2x_vfq(vf, qid, vlan_count), 0);
 
 	return 0;
 }
@@ -406,13 +406,17 @@ static int bnx2x_vf_mac_vlan_config(struct bnx2x *bp,
 
 	DP(BNX2X_MSG_IOV, "vf[%d] - %s a %s filter\n",
 	   vf->abs_vfid, filter->add ? "Adding" : "Deleting",
-	   filter->type == BNX2X_VF_FILTER_MAC ? "MAC" : "VLAN");
+	   (filter->type == BNX2X_VF_FILTER_VLAN_MAC) ? "VLAN-MAC" :
+	   (filter->type == BNX2X_VF_FILTER_MAC) ? "MAC" : "VLAN");
 
 	/* Prepare ramrod params */
 	memset(&ramrod, 0, sizeof(struct bnx2x_vlan_mac_ramrod_params));
-	if (filter->type == BNX2X_VF_FILTER_VLAN) {
-		set_bit(BNX2X_DONT_CONSUME_CAM_CREDIT,
-			&ramrod.user_req.vlan_mac_flags);
+	if (filter->type == BNX2X_VF_FILTER_VLAN_MAC) {
+		ramrod.vlan_mac_obj = &bnx2x_vfq(vf, qid, vlan_mac_obj);
+		ramrod.user_req.u.vlan.vlan = filter->vid;
+		memcpy(&ramrod.user_req.u.mac.mac, filter->mac, ETH_ALEN);
+		set_bit(BNX2X_ETH_MAC, &ramrod.user_req.vlan_mac_flags);
+	} else if (filter->type == BNX2X_VF_FILTER_VLAN) {
 		ramrod.vlan_mac_obj = &bnx2x_vfq(vf, qid, vlan_obj);
 		ramrod.user_req.u.vlan.vlan = filter->vid;
 	} else {
@@ -423,14 +427,6 @@ static int bnx2x_vf_mac_vlan_config(struct bnx2x *bp,
 	ramrod.user_req.cmd = filter->add ? BNX2X_VLAN_MAC_ADD :
 					    BNX2X_VLAN_MAC_DEL;
 
-	/* Verify there are available vlan credits */
-	if (filter->add && filter->type == BNX2X_VF_FILTER_VLAN &&
-	    (atomic_read(&bnx2x_vfq(vf, qid, vlan_count)) >=
-	     vf_vlan_rules_cnt(vf))) {
-		BNX2X_ERR("No credits for vlan\n");
-		return -ENOMEM;
-	}
-
 	set_bit(RAMROD_EXEC, &ramrod.ramrod_flags);
 	if (drv_only)
 		set_bit(RAMROD_DRV_CLR_ONLY, &ramrod.ramrod_flags);
@@ -439,18 +435,19 @@ static int bnx2x_vf_mac_vlan_config(struct bnx2x *bp,
 
 	/* Add/Remove the filter */
 	rc = bnx2x_config_vlan_mac(bp, &ramrod);
-	if (rc && rc != -EEXIST) {
+	if (rc == -EEXIST)
+		return 0;
+	if (rc) {
 		BNX2X_ERR("Failed to %s %s\n",
 			  filter->add ? "add" : "delete",
-			  filter->type == BNX2X_VF_FILTER_MAC ? "MAC" :
-								"VLAN");
+			  (filter->type == BNX2X_VF_FILTER_VLAN_MAC) ?
+				"VLAN-MAC" :
+			  (filter->type == BNX2X_VF_FILTER_MAC) ?
+				"MAC" : "VLAN");
 		return rc;
 	}
 
-	/* Update the vlan counters */
-	if (filter->type == BNX2X_VF_FILTER_VLAN)
-		bnx2x_vf_vlan_credit(bp, ramrod.vlan_mac_obj,
-				     &bnx2x_vfq(vf, qid, vlan_count));
+	filter->applied = true;
 
 	return 0;
 }
@@ -477,8 +474,10 @@ int bnx2x_vf_mac_vlan_config_list(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	/* Rollback if needed */
 	if (i != filters->count) {
 		BNX2X_ERR("Managed only %d/%d filters - rolling back\n",
-			  i, filters->count + 1);
+			  i, filters->count);
 		while (--i >= 0) {
+			if (!filters->filters[i].applied)
+				continue;
 			filters->filters[i].add = !filters->filters[i].add;
 			bnx2x_vf_mac_vlan_config(bp, vf, qid,
 						 &filters->filters[i],
@@ -503,21 +502,7 @@ int bnx2x_vf_queue_setup(struct bnx2x *bp, struct bnx2x_virtf *vf, int qid,
 	if (rc)
 		goto op_err;
 
-	/* Configure vlan0 for leading queue */
-	if (!qid) {
-		struct bnx2x_vf_mac_vlan_filter filter;
-
-		memset(&filter, 0, sizeof(struct bnx2x_vf_mac_vlan_filter));
-		filter.type = BNX2X_VF_FILTER_VLAN;
-		filter.add = true;
-		filter.vid = 0;
-		rc = bnx2x_vf_mac_vlan_config(bp, vf, qid, &filter, false);
-		if (rc)
-			goto op_err;
-	}
-
 	/* Schedule the configuration of any pending vlan filters */
-	vf->cfg_flags |= VF_CFG_VLAN;
 	bnx2x_schedule_sp_rtnl(bp, BNX2X_SP_RTNL_HYPERVISOR_VLAN,
 			       BNX2X_MSG_IOV);
 	return 0;
@@ -536,10 +521,16 @@ static int bnx2x_vf_queue_flr(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	/* If needed, clean the filtering data base */
 	if ((qid == LEADING_IDX) &&
 	    bnx2x_validate_vf_sp_objs(bp, vf, false)) {
-		rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid, true, false);
+		rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid, true,
+					     BNX2X_VF_FILTER_VLAN_MAC);
 		if (rc)
 			goto op_err;
-		rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid, true, true);
+		rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid, true,
+					     BNX2X_VF_FILTER_VLAN);
+		if (rc)
+			goto op_err;
+		rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid, true,
+					     BNX2X_VF_FILTER_MAC);
 		if (rc)
 			goto op_err;
 	}
@@ -581,26 +572,14 @@ int bnx2x_vf_mcast(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	else
 		set_bit(RAMROD_COMP_WAIT, &mcast.ramrod_flags);
 	if (mc_num) {
-		mc = kzalloc(mc_num * sizeof(struct bnx2x_mcast_list_elem),
+		mc = kcalloc(mc_num, sizeof(struct bnx2x_mcast_list_elem),
 			     GFP_KERNEL);
 		if (!mc) {
-			BNX2X_ERR("Cannot Configure mulicasts due to lack of memory\n");
+			BNX2X_ERR("Cannot Configure multicasts due to lack of memory\n");
 			return -ENOMEM;
 		}
 	}
 
-	/* clear existing mcasts */
-	mcast.mcast_list_len = vf->mcast_list_len;
-	vf->mcast_list_len = mc_num;
-	rc = bnx2x_config_mcast(bp, &mcast, BNX2X_MCAST_CMD_DEL);
-	if (rc) {
-		BNX2X_ERR("Failed to remove multicasts\n");
-		if (mc)
-			kfree(mc);
-		return rc;
-	}
-
-	/* update mcast list on the ramrod params */
 	if (mc_num) {
 		INIT_LIST_HEAD(&mcast.mcast_list);
 		for (i = 0; i < mc_num; i++) {
@@ -610,11 +589,18 @@ int bnx2x_vf_mcast(struct bnx2x *bp, struct bnx2x_virtf *vf,
 		}
 
 		/* add new mcasts */
-		rc = bnx2x_config_mcast(bp, &mcast, BNX2X_MCAST_CMD_ADD);
+		mcast.mcast_list_len = mc_num;
+		rc = bnx2x_config_mcast(bp, &mcast, BNX2X_MCAST_CMD_SET);
 		if (rc)
-			BNX2X_ERR("Faled to add multicasts\n");
-		kfree(mc);
+			BNX2X_ERR("Failed to set multicasts\n");
+	} else {
+		/* clear existing mcasts */
+		rc = bnx2x_config_mcast(bp, &mcast, BNX2X_MCAST_CMD_DEL);
+		if (rc)
+			BNX2X_ERR("Failed to remove multicasts\n");
 	}
+
+	kfree(mc);
 
 	return rc;
 }
@@ -672,11 +658,18 @@ int bnx2x_vf_queue_teardown(struct bnx2x *bp, struct bnx2x_virtf *vf, int qid)
 		/* Remove filtering if feasible */
 		if (bnx2x_validate_vf_sp_objs(bp, vf, true)) {
 			rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid,
-						     false, false);
+						     false,
+						     BNX2X_VF_FILTER_VLAN_MAC);
 			if (rc)
 				goto op_err;
 			rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid,
-						     false, true);
+						     false,
+						     BNX2X_VF_FILTER_VLAN);
+			if (rc)
+				goto op_err;
+			rc = bnx2x_vf_vlan_mac_clear(bp, vf, qid,
+						     false,
+						     BNX2X_VF_FILTER_MAC);
 			if (rc)
 				goto op_err;
 			rc = bnx2x_vf_mcast(bp, vf, NULL, 0, false);
@@ -757,8 +750,6 @@ static void bnx2x_vf_igu_reset(struct bnx2x *bp, struct bnx2x_virtf *vf)
 
 	val = REG_RD(bp, IGU_REG_VF_CONFIGURATION);
 	val |= (IGU_VF_CONF_FUNC_EN | IGU_VF_CONF_MSI_MSIX_EN);
-	if (vf->cfg_flags & VF_CFG_INT_SIMD)
-		val |= IGU_VF_CONF_SINGLE_ISR_EN;
 	val &= ~IGU_VF_CONF_PARENT_MASK;
 	val |= (BP_ABS_FUNC(bp) >> 1) << IGU_VF_CONF_PARENT_SHIFT;
 	REG_WR(bp, IGU_REG_VF_CONFIGURATION, val);
@@ -822,7 +813,7 @@ static u8 bnx2x_vf_is_pcie_pending(struct bnx2x *bp, u8 abs_vfid)
 	if (!vf)
 		return false;
 
-	dev = pci_get_bus_and_slot(vf->bus, vf->devfn);
+	dev = pci_get_domain_bus_and_slot(vf->domain, vf->bus, vf->devfn);
 	if (dev)
 		return bnx2x_is_pcie_pending(dev);
 	return false;
@@ -844,19 +835,13 @@ static void
 bnx2x_iov_static_resc(struct bnx2x *bp, struct bnx2x_virtf *vf)
 {
 	struct vf_pf_resc_request *resc = &vf->alloc_resc;
-	u16 vlan_count = 0;
 
 	/* will be set only during VF-ACQUIRE */
 	resc->num_rxqs = 0;
 	resc->num_txqs = 0;
 
-	/* no credit calculations for macs (just yet) */
-	resc->num_mac_filters = 1;
-
-	/* divvy up vlan rules */
-	vlan_count = bp->vlans_pool.check(&bp->vlans_pool);
-	vlan_count = 1 << ilog2(vlan_count);
-	resc->num_vlan_filters = vlan_count / BNX2X_NR_VIRTFN(bp);
+	resc->num_mac_filters = VF_MAC_CREDIT_CNT;
+	resc->num_vlan_filters = VF_VLAN_CREDIT_CNT;
 
 	/* no real limitation */
 	resc->num_mc_filters = 0;
@@ -916,6 +901,8 @@ static void bnx2x_vf_flr(struct bnx2x *bp, struct bnx2x_virtf *vf)
 
 	/* release VF resources */
 	bnx2x_vf_free_resc(bp, vf);
+
+	vf->malicious = false;
 
 	/* re-open the mailbox */
 	bnx2x_vf_enable_mbx(bp, vf->abs_vfid);
@@ -1043,14 +1030,23 @@ void bnx2x_iov_init_dq(struct bnx2x *bp)
 	REG_WR(bp, DORQ_REG_VF_TYPE_MIN_MCID_0, 0);
 	REG_WR(bp, DORQ_REG_VF_TYPE_MAX_MCID_0, 0x1ffff);
 
-	/* set the VF doorbell threshold */
-	REG_WR(bp, DORQ_REG_VF_USAGE_CT_LIMIT, 4);
+	/* set the VF doorbell threshold. This threshold represents the amount
+	 * of doorbells allowed in the main DORQ fifo for a specific VF.
+	 */
+	REG_WR(bp, DORQ_REG_VF_USAGE_CT_LIMIT, 64);
 }
 
 void bnx2x_iov_init_dmae(struct bnx2x *bp)
 {
 	if (pci_find_ext_capability(bp->pdev, PCI_EXT_CAP_ID_SRIOV))
 		REG_WR(bp, DMAE_REG_BACKWARD_COMP_EN, 0);
+}
+
+static int bnx2x_vf_domain(struct bnx2x *bp, int vfid)
+{
+	struct pci_dev *dev = bp->pdev;
+
+	return pci_domain_nr(dev->bus);
 }
 
 static int bnx2x_vf_bus(struct bnx2x *bp, int vfid)
@@ -1086,12 +1082,7 @@ static void bnx2x_vf_set_bars(struct bnx2x *bp, struct bnx2x_virtf *vf)
 	}
 }
 
-static int bnx2x_ari_enabled(struct pci_dev *dev)
-{
-	return dev->bus->self && dev->bus->self->ari_enabled;
-}
-
-static void
+static int
 bnx2x_get_vf_igu_cam_info(struct bnx2x *bp)
 {
 	int sb_id;
@@ -1116,6 +1107,7 @@ bnx2x_get_vf_igu_cam_info(struct bnx2x *bp)
 		   GET_FIELD((val), IGU_REG_MAPPING_MEMORY_VECTOR));
 	}
 	DP(BNX2X_MSG_IOV, "vf_sbs_pool is %d\n", BP_VFDB(bp)->vf_sbs_pool);
+	return BP_VFDB(bp)->vf_sbs_pool;
 }
 
 static void __bnx2x_iov_free_vfdb(struct bnx2x *bp)
@@ -1223,7 +1215,7 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 
 	err = -EIO;
 	/* verify ari is enabled */
-	if (!bnx2x_ari_enabled(bp->pdev)) {
+	if (!pci_ari_enabled(bp->pdev->bus)) {
 		BNX2X_ERR("ARI not supported (check pci bridge ARI forwarding), SRIOV can not be enabled\n");
 		return 0;
 	}
@@ -1262,8 +1254,9 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 	   num_vfs_param, iov->nr_virtfn);
 
 	/* allocate the vf array */
-	bp->vfdb->vfs = kzalloc(sizeof(struct bnx2x_virtf) *
-				BNX2X_NR_VIRTFN(bp), GFP_KERNEL);
+	bp->vfdb->vfs = kcalloc(BNX2X_NR_VIRTFN(bp),
+				sizeof(struct bnx2x_virtf),
+				GFP_KERNEL);
 	if (!bp->vfdb->vfs) {
 		BNX2X_ERR("failed to allocate vf array\n");
 		err = -ENOMEM;
@@ -1277,17 +1270,21 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 		bnx2x_vf(bp, i, state) = VF_FREE;
 		mutex_init(&bnx2x_vf(bp, i, op_mutex));
 		bnx2x_vf(bp, i, op_current) = CHANNEL_TLV_NONE;
+		/* enable spoofchk by default */
+		bnx2x_vf(bp, i, spoofchk) = 1;
 	}
 
 	/* re-read the IGU CAM for VFs - index and abs_vfid must be set */
-	bnx2x_get_vf_igu_cam_info(bp);
+	if (!bnx2x_get_vf_igu_cam_info(bp)) {
+		BNX2X_ERR("No entries in IGU CAM for vfs\n");
+		err = -EINVAL;
+		goto failed;
+	}
 
 	/* allocate the queue arrays for all VFs */
-	bp->vfdb->vfqs = kzalloc(
-		BNX2X_MAX_NUM_VF_QUEUES * sizeof(struct bnx2x_vf_queue),
-		GFP_KERNEL);
-
-	DP(BNX2X_MSG_IOV, "bp->vfdb->vfqs was %p\n", bp->vfdb->vfqs);
+	bp->vfdb->vfqs = kcalloc(BNX2X_MAX_NUM_VF_QUEUES,
+				 sizeof(struct bnx2x_vf_queue),
+				 GFP_KERNEL);
 
 	if (!bp->vfdb->vfqs) {
 		BNX2X_ERR("failed to allocate vf queue array\n");
@@ -1297,6 +1294,11 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 
 	/* Prepare the VFs event synchronization mechanism */
 	mutex_init(&bp->vfdb->event_mutex);
+
+	mutex_init(&bp->vfdb->bulletin_mutex);
+
+	if (SHMEM2_HAS(bp, sriov_switch_mode))
+		SHMEM2_WR(bp, sriov_switch_mode, SRIOV_SWITCH_MODE_VEB);
 
 	return 0;
 failed:
@@ -1313,9 +1315,7 @@ void bnx2x_iov_remove_one(struct bnx2x *bp)
 	if (!IS_SRIOV(bp))
 		return;
 
-	DP(BNX2X_MSG_IOV, "about to call disable sriov\n");
-	pci_disable_sriov(bp->pdev);
-	DP(BNX2X_MSG_IOV, "sriov disabled\n");
+	bnx2x_disable_sriov(bp);
 
 	/* disable access to all VFs */
 	for (vf_idx = 0; vf_idx < bp->vfdb->sriov.total; vf_idx++) {
@@ -1443,6 +1443,107 @@ static void bnx2x_vfq_init(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	   vf->abs_vfid, q->sp_obj.func_id, q->cid);
 }
 
+static int bnx2x_max_speed_cap(struct bnx2x *bp)
+{
+	u32 supported = bp->port.supported[bnx2x_get_link_cfg_idx(bp)];
+
+	if (supported &
+	    (SUPPORTED_20000baseMLD2_Full | SUPPORTED_20000baseKR2_Full))
+		return 20000;
+
+	return 10000; /* assume lowest supported speed is 10G */
+}
+
+int bnx2x_iov_link_update_vf(struct bnx2x *bp, int idx)
+{
+	struct bnx2x_link_report_data *state = &bp->last_reported_link;
+	struct pf_vf_bulletin_content *bulletin;
+	struct bnx2x_virtf *vf;
+	bool update = true;
+	int rc = 0;
+
+	/* sanity and init */
+	rc = bnx2x_vf_op_prep(bp, idx, &vf, &bulletin, false);
+	if (rc)
+		return rc;
+
+	mutex_lock(&bp->vfdb->bulletin_mutex);
+
+	if (vf->link_cfg == IFLA_VF_LINK_STATE_AUTO) {
+		bulletin->valid_bitmap |= 1 << LINK_VALID;
+
+		bulletin->link_speed = state->line_speed;
+		bulletin->link_flags = 0;
+		if (test_bit(BNX2X_LINK_REPORT_LINK_DOWN,
+			     &state->link_report_flags))
+			bulletin->link_flags |= VFPF_LINK_REPORT_LINK_DOWN;
+		if (test_bit(BNX2X_LINK_REPORT_FD,
+			     &state->link_report_flags))
+			bulletin->link_flags |= VFPF_LINK_REPORT_FULL_DUPLEX;
+		if (test_bit(BNX2X_LINK_REPORT_RX_FC_ON,
+			     &state->link_report_flags))
+			bulletin->link_flags |= VFPF_LINK_REPORT_RX_FC_ON;
+		if (test_bit(BNX2X_LINK_REPORT_TX_FC_ON,
+			     &state->link_report_flags))
+			bulletin->link_flags |= VFPF_LINK_REPORT_TX_FC_ON;
+	} else if (vf->link_cfg == IFLA_VF_LINK_STATE_DISABLE &&
+		   !(bulletin->link_flags & VFPF_LINK_REPORT_LINK_DOWN)) {
+		bulletin->valid_bitmap |= 1 << LINK_VALID;
+		bulletin->link_flags |= VFPF_LINK_REPORT_LINK_DOWN;
+	} else if (vf->link_cfg == IFLA_VF_LINK_STATE_ENABLE &&
+		   (bulletin->link_flags & VFPF_LINK_REPORT_LINK_DOWN)) {
+		bulletin->valid_bitmap |= 1 << LINK_VALID;
+		bulletin->link_speed = bnx2x_max_speed_cap(bp);
+		bulletin->link_flags &= ~VFPF_LINK_REPORT_LINK_DOWN;
+	} else {
+		update = false;
+	}
+
+	if (update) {
+		DP(NETIF_MSG_LINK | BNX2X_MSG_IOV,
+		   "vf %d mode %u speed %d flags %x\n", idx,
+		   vf->link_cfg, bulletin->link_speed, bulletin->link_flags);
+
+		/* Post update on VF's bulletin board */
+		rc = bnx2x_post_vf_bulletin(bp, idx);
+		if (rc) {
+			BNX2X_ERR("failed to update VF[%d] bulletin\n", idx);
+			goto out;
+		}
+	}
+
+out:
+	mutex_unlock(&bp->vfdb->bulletin_mutex);
+	return rc;
+}
+
+int bnx2x_set_vf_link_state(struct net_device *dev, int idx, int link_state)
+{
+	struct bnx2x *bp = netdev_priv(dev);
+	struct bnx2x_virtf *vf = BP_VF(bp, idx);
+
+	if (!vf)
+		return -EINVAL;
+
+	if (vf->link_cfg == link_state)
+		return 0; /* nothing todo */
+
+	vf->link_cfg = link_state;
+
+	return bnx2x_iov_link_update_vf(bp, idx);
+}
+
+void bnx2x_iov_link_update(struct bnx2x *bp)
+{
+	int vfid;
+
+	if (!IS_SRIOV(bp))
+		return;
+
+	for_each_vf(bp, vfid)
+		bnx2x_iov_link_update_vf(bp, vfid);
+}
+
 /* called by bnx2x_nic_load */
 int bnx2x_iov_nic_init(struct bnx2x *bp)
 {
@@ -1478,19 +1579,19 @@ int bnx2x_iov_nic_init(struct bnx2x *bp)
 		bnx2x_iov_static_resc(bp, vf);
 
 		/* queues are initialized during VF-ACQUIRE */
-
-		/* reserve the vf vlan credit */
-		bp->vlans_pool.get(&bp->vlans_pool, vf_vlan_rules_cnt(vf));
-
 		vf->filter_state = 0;
 		vf->sp_cl_id = bnx2x_fp(bp, 0, cl_id);
+
+		bnx2x_init_credit_pool(&vf->vf_vlans_pool, 0,
+				       vf_vlan_rules_cnt(vf));
+		bnx2x_init_credit_pool(&vf->vf_macs_pool, 0,
+				       vf_mac_rules_cnt(vf));
 
 		/*  init mcast object - This object will be re-initialized
 		 *  during VF-ACQUIRE with the proper cl_id and cid.
 		 *  It needs to be initialized here so that it can be safely
 		 *  handled by a subsequent FLR flow.
 		 */
-		vf->mcast_list_len = 0;
 		bnx2x_init_mcast_obj(bp, &vf->mcast_obj, 0xFF,
 				     0xFF, 0xFF, 0xFF,
 				     bnx2x_vf_sp(bp, vf, mcast_rdata),
@@ -1516,6 +1617,7 @@ int bnx2x_iov_nic_init(struct bnx2x *bp)
 		struct bnx2x_virtf *vf = BP_VF(bp, vfid);
 
 		/* fill in the BDF and bars */
+		vf->domain = bnx2x_vf_domain(bp, vfid);
 		vf->bus = bnx2x_vf_bus(bp, vfid);
 		vf->devfn = bnx2x_vf_devfn(bp, vfid);
 		bnx2x_vf_set_bars(bp, vf);
@@ -1579,11 +1681,12 @@ void bnx2x_vf_handle_classification_eqe(struct bnx2x *bp,
 {
 	unsigned long ramrod_flags = 0;
 	int rc = 0;
+	u32 echo = le32_to_cpu(elem->message.data.eth_event.echo);
 
 	/* Always push next commands out, don't wait here */
 	set_bit(RAMROD_CONT, &ramrod_flags);
 
-	switch (elem->message.data.eth_event.echo >> BNX2X_SWCID_SHIFT) {
+	switch (echo >> BNX2X_SWCID_SHIFT) {
 	case BNX2X_FILTER_MAC_PENDING:
 		rc = vfq->mac_obj.complete(bp, &vfq->mac_obj, elem,
 					   &ramrod_flags);
@@ -1593,8 +1696,7 @@ void bnx2x_vf_handle_classification_eqe(struct bnx2x *bp,
 					    &ramrod_flags);
 		break;
 	default:
-		BNX2X_ERR("Unsupported classification command: %d\n",
-			  elem->message.data.eth_event.echo);
+		BNX2X_ERR("Unsupported classification command: 0x%x\n", echo);
 		return;
 	}
 	if (rc < 0)
@@ -1626,9 +1728,9 @@ static
 void bnx2x_vf_handle_filters_eqe(struct bnx2x *bp,
 				 struct bnx2x_virtf *vf)
 {
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	clear_bit(BNX2X_FILTER_RX_MODE_PENDING, &vf->filter_state);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 }
 
 static void bnx2x_vf_handle_rss_update_eqe(struct bnx2x *bp,
@@ -1654,16 +1756,14 @@ int bnx2x_iov_eq_sp_event(struct bnx2x *bp, union event_ring_elem *elem)
 
 	switch (opcode) {
 	case EVENT_RING_OPCODE_CFC_DEL:
-		cid = SW_CID((__force __le32)
-			     elem->message.data.cfc_del_event.cid);
+		cid = SW_CID(elem->message.data.cfc_del_event.cid);
 		DP(BNX2X_MSG_IOV, "checking cfc-del comp cid=%d\n", cid);
 		break;
 	case EVENT_RING_OPCODE_CLASSIFICATION_RULES:
 	case EVENT_RING_OPCODE_MULTICAST_RULES:
 	case EVENT_RING_OPCODE_FILTERS_RULES:
 	case EVENT_RING_OPCODE_RSS_UPDATE_RULES:
-		cid = (elem->message.data.eth_event.echo &
-		       BNX2X_SWCID_MASK);
+		cid = SW_CID(elem->message.data.eth_event.echo);
 		DP(BNX2X_MSG_IOV, "checking filtering comp cid=%d\n", cid);
 		break;
 	case EVENT_RING_OPCODE_VF_FLR:
@@ -1730,9 +1830,12 @@ get_vf:
 		DP(BNX2X_MSG_IOV, "got VF [%d:%d] RSS update ramrod\n",
 		   vf->abs_vfid, qidx);
 		bnx2x_vf_handle_rss_update_eqe(bp, vf);
+		/* fall through */
 	case EVENT_RING_OPCODE_VF_FLR:
-	case EVENT_RING_OPCODE_MALICIOUS_VF:
 		/* Do nothing for now */
+		return 0;
+	case EVENT_RING_OPCODE_MALICIOUS_VF:
+		vf->malicious = true;
 		return 0;
 	}
 
@@ -1814,7 +1917,15 @@ void bnx2x_iov_adjust_stats_req(struct bnx2x *bp)
 			continue;
 		}
 
-		DP(BNX2X_MSG_IOV, "add addresses for vf %d\n", vf->abs_vfid);
+		if (vf->malicious) {
+			DP_AND((BNX2X_MSG_IOV | BNX2X_MSG_STATS),
+			       "vf %d malicious so no stats for it\n",
+			       vf->abs_vfid);
+			continue;
+		}
+
+		DP_AND((BNX2X_MSG_IOV | BNX2X_MSG_STATS),
+		       "add addresses for vf %d\n", vf->abs_vfid);
 		for_each_vfq(vf, j) {
 			struct bnx2x_vf_queue *rxq = vfq_get(vf, j);
 
@@ -1835,11 +1946,12 @@ void bnx2x_iov_adjust_stats_req(struct bnx2x *bp)
 				cpu_to_le32(U64_HI(q_stats_addr));
 			cur_query_entry->address.lo =
 				cpu_to_le32(U64_LO(q_stats_addr));
-			DP(BNX2X_MSG_IOV,
-			   "added address %x %x for vf %d queue %d client %d\n",
-			   cur_query_entry->address.hi,
-			   cur_query_entry->address.lo, cur_query_entry->funcID,
-			   j, cur_query_entry->index);
+			DP_AND((BNX2X_MSG_IOV | BNX2X_MSG_STATS),
+			       "added address %x %x for vf %d queue %d client %d\n",
+			       cur_query_entry->address.hi,
+			       cur_query_entry->address.lo,
+			       cur_query_entry->funcID,
+			       j, cur_query_entry->index);
 			cur_query_entry++;
 			cur_data_offset += sizeof(struct per_queue_stats);
 			stats_count++;
@@ -1850,21 +1962,6 @@ void bnx2x_iov_adjust_stats_req(struct bnx2x *bp)
 		}
 	}
 	bp->fw_stats_req->hdr.cmd_num = bp->fw_stats_num + stats_count;
-}
-
-static inline
-struct bnx2x_virtf *__vf_from_stat_id(struct bnx2x *bp, u8 stat_id)
-{
-	int i;
-	struct bnx2x_virtf *vf = NULL;
-
-	for_each_vf(bp, i) {
-		vf = BP_VF(bp, i);
-		if (stat_id >= vf->igu_base_id &&
-		    stat_id < vf->igu_base_id + vf_sb_count(vf))
-			break;
-	}
-	return vf;
 }
 
 /* VF API helpers */
@@ -1970,10 +2067,6 @@ int bnx2x_vf_acquire(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	vf_sb_count(vf) = resc->num_sbs;
 	vf_rxq_count(vf) = resc->num_rxqs ? : bnx2x_vf_max_queue_cnt(bp, vf);
 	vf_txq_count(vf) = resc->num_txqs ? : bnx2x_vf_max_queue_cnt(bp, vf);
-	if (resc->num_mac_filters)
-		vf_mac_rules_cnt(vf) = resc->num_mac_filters;
-	if (resc->num_vlan_filters)
-		vf_vlan_rules_cnt(vf) = resc->num_vlan_filters;
 
 	DP(BNX2X_MSG_IOV,
 	   "Fulfilling vf request: sb count %d, tx_count %d, rx_count %d, mac_rules_count %d, vlan_rules_count %d\n",
@@ -2012,7 +2105,6 @@ int bnx2x_vf_acquire(struct bnx2x *bp, struct bnx2x_virtf *vf,
 int bnx2x_vf_init(struct bnx2x *bp, struct bnx2x_virtf *vf, dma_addr_t *sb_map)
 {
 	struct bnx2x_func_init_params func_init = {0};
-	u16 flags = 0;
 	int i;
 
 	/* the sb resources are initialized at this point, do the
@@ -2039,23 +2131,9 @@ int bnx2x_vf_init(struct bnx2x *bp, struct bnx2x_virtf *vf, dma_addr_t *sb_map)
 	/* reset IGU VF statistics: MSIX */
 	REG_WR(bp, IGU_REG_STATISTIC_NUM_MESSAGE_SENT + vf->abs_vfid * 4 , 0);
 
-	/* vf init */
-	if (vf->cfg_flags & VF_CFG_STATS)
-		flags |= (FUNC_FLG_STATS | FUNC_FLG_SPQ);
-
-	if (vf->cfg_flags & VF_CFG_TPA)
-		flags |= FUNC_FLG_TPA;
-
-	if (is_vf_multi(vf))
-		flags |= FUNC_FLG_RSS;
-
 	/* function setup */
-	func_init.func_flgs = flags;
 	func_init.pf_id = BP_FUNC(bp);
 	func_init.func_id = FW_VF_HANDLE(vf->abs_vfid);
-	func_init.fw_stat_map = vf->fw_stat_map;
-	func_init.spq_map = vf->spq_map;
-	func_init.spq_prod = 0;
 	bnx2x_func_init(bp, &func_init);
 
 	/* Enable the vf */
@@ -2117,7 +2195,9 @@ int bnx2x_vf_close(struct bnx2x *bp, struct bnx2x_virtf *vf)
 
 		cookie.vf = vf;
 		cookie.state = VF_ACQUIRED;
-		bnx2x_stats_safe_exec(bp, bnx2x_set_vf_state, &cookie);
+		rc = bnx2x_stats_safe_exec(bp, bnx2x_set_vf_state, &cookie);
+		if (rc)
+			goto op_err;
 	}
 
 	DP(BNX2X_MSG_IOV, "set state to acquired\n");
@@ -2148,7 +2228,7 @@ int bnx2x_vf_free(struct bnx2x *bp, struct bnx2x_virtf *vf)
 		rc = bnx2x_vf_close(bp, vf);
 		if (rc)
 			goto op_err;
-		/* Fallthrough to release resources */
+		/* Fall through - to release resources */
 	case VF_ACQUIRED:
 		DP(BNX2X_MSG_IOV, "about to free resources\n");
 		bnx2x_vf_free_resc(bp, vf);
@@ -2228,12 +2308,6 @@ int bnx2x_vf_release(struct bnx2x *bp, struct bnx2x_virtf *vf)
 	return rc;
 }
 
-static inline void bnx2x_vf_get_sbdf(struct bnx2x *bp,
-			      struct bnx2x_virtf *vf, u32 *sbdf)
-{
-	*sbdf = vf->devfn | (vf->bus << 8);
-}
-
 void bnx2x_lock_vf_pf_channel(struct bnx2x *bp, struct bnx2x_virtf *vf,
 			      enum channel_tlvs tlv)
 {
@@ -2282,7 +2356,7 @@ void bnx2x_unlock_vf_pf_channel(struct bnx2x *bp, struct bnx2x_virtf *vf,
 
 	/* log the unlock */
 	DP(BNX2X_MSG_IOV, "VF[%d]: vf pf channel unlocked by %d\n",
-	   vf->abs_vfid, vf->op_current);
+	   vf->abs_vfid, current_tlv);
 }
 
 static int bnx2x_set_pf_tx_switching(struct bnx2x *bp, bool enable)
@@ -2323,15 +2397,21 @@ static int bnx2x_set_pf_tx_switching(struct bnx2x *bp, bool enable)
 	/* send the ramrod on all the queues of the PF */
 	for_each_eth_queue(bp, i) {
 		struct bnx2x_fastpath *fp = &bp->fp[i];
+		int tx_idx;
 
 		/* Set the appropriate Queue object */
 		q_params.q_obj = &bnx2x_sp_obj(bp, fp).q_obj;
 
-		/* Update the Queue state */
-		rc = bnx2x_queue_state_change(bp, &q_params);
-		if (rc) {
-			BNX2X_ERR("Failed to configure Tx switching\n");
-			return rc;
+		for (tx_idx = FIRST_TX_COS_INDEX;
+		     tx_idx < fp->max_cos; tx_idx++) {
+			q_params.params.update.cid_index = tx_idx;
+
+			/* Update the Queue state */
+			rc = bnx2x_queue_state_change(bp, &q_params);
+			if (rc) {
+				BNX2X_ERR("Failed to configure Tx switching\n");
+				return rc;
+			}
 		}
 	}
 
@@ -2367,7 +2447,7 @@ int bnx2x_sriov_configure(struct pci_dev *dev, int num_vfs_param)
 	bp->requested_nr_virtfn = num_vfs_param;
 	if (num_vfs_param == 0) {
 		bnx2x_set_pf_tx_switching(bp, false);
-		pci_disable_sriov(dev);
+		bnx2x_disable_sriov(bp);
 		return 0;
 	} else {
 		return bnx2x_enable_sriov(bp);
@@ -2472,33 +2552,41 @@ void bnx2x_pf_set_vfs_vlan(struct bnx2x *bp)
 
 	DP(BNX2X_MSG_IOV, "configuring vlan for VFs from sp-task\n");
 	for_each_vf(bp, vfidx) {
-	bulletin = BP_VF_BULLETIN(bp, vfidx);
-		if (BP_VF(bp, vfidx)->cfg_flags & VF_CFG_VLAN)
-			bnx2x_set_vf_vlan(bp->dev, vfidx, bulletin->vlan, 0);
+		bulletin = BP_VF_BULLETIN(bp, vfidx);
+		if (bulletin->valid_bitmap & (1 << VLAN_VALID))
+			bnx2x_set_vf_vlan(bp->dev, vfidx, bulletin->vlan, 0,
+					  htons(ETH_P_8021Q));
 	}
 }
 
 void bnx2x_disable_sriov(struct bnx2x *bp)
 {
+	if (pci_vfs_assigned(bp->pdev)) {
+		DP(BNX2X_MSG_IOV,
+		   "Unloading driver while VFs are assigned - VFs will not be deallocated\n");
+		return;
+	}
+
 	pci_disable_sriov(bp->pdev);
 }
 
-static int bnx2x_vf_ndo_prep(struct bnx2x *bp, int vfidx,
-			     struct bnx2x_virtf **vf,
-			     struct pf_vf_bulletin_content **bulletin)
+static int bnx2x_vf_op_prep(struct bnx2x *bp, int vfidx,
+			    struct bnx2x_virtf **vf,
+			    struct pf_vf_bulletin_content **bulletin,
+			    bool test_queue)
 {
 	if (bp->state != BNX2X_STATE_OPEN) {
-		BNX2X_ERR("vf ndo called though PF is down\n");
+		BNX2X_ERR("PF is down - can't utilize iov-related functionality\n");
 		return -EINVAL;
 	}
 
 	if (!IS_SRIOV(bp)) {
-		BNX2X_ERR("vf ndo called though sriov is disabled\n");
+		BNX2X_ERR("sriov is disabled - can't utilize iov-related functionality\n");
 		return -EINVAL;
 	}
 
 	if (vfidx >= BNX2X_NR_VIRTFN(bp)) {
-		BNX2X_ERR("vf ndo called for uninitialized VF. vfidx was %d BNX2X_NR_VIRTFN was %d\n",
+		BNX2X_ERR("VF is uninitialized - can't utilize iov-related functionality. vfidx was %d BNX2X_NR_VIRTFN was %d\n",
 			  vfidx, BNX2X_NR_VIRTFN(bp));
 		return -EINVAL;
 	}
@@ -2508,19 +2596,18 @@ static int bnx2x_vf_ndo_prep(struct bnx2x *bp, int vfidx,
 	*bulletin = BP_VF_BULLETIN(bp, vfidx);
 
 	if (!*vf) {
-		BNX2X_ERR("vf ndo called but vf struct is null. vfidx was %d\n",
-			  vfidx);
+		BNX2X_ERR("Unable to get VF structure for vfidx %d\n", vfidx);
 		return -EINVAL;
 	}
 
-	if (!(*vf)->vfqs) {
-		BNX2X_ERR("vf ndo called but vfqs struct is null. Was ndo invoked before dynamically enabling SR-IOV? vfidx was %d\n",
+	if (test_queue && !(*vf)->vfqs) {
+		BNX2X_ERR("vfqs struct is null. Was this invoked before dynamically enabling SR-IOV? vfidx was %d\n",
 			  vfidx);
 		return -EINVAL;
 	}
 
 	if (!*bulletin) {
-		BNX2X_ERR("vf ndo called but Bulletin Board struct is null. vfidx was %d\n",
+		BNX2X_ERR("Bulletin Board struct is null for vfidx %d\n",
 			  vfidx);
 		return -EINVAL;
 	}
@@ -2539,9 +2626,10 @@ int bnx2x_get_vf_config(struct net_device *dev, int vfidx,
 	int rc;
 
 	/* sanity and init */
-	rc = bnx2x_vf_ndo_prep(bp, vfidx, &vf, &bulletin);
+	rc = bnx2x_vf_op_prep(bp, vfidx, &vf, &bulletin, true);
 	if (rc)
 		return rc;
+
 	mac_obj = &bnx2x_leading_vfq(vf, mac_obj);
 	vlan_obj = &bnx2x_leading_vfq(vf, vlan_obj);
 	if (!mac_obj || !vlan_obj) {
@@ -2551,8 +2639,10 @@ int bnx2x_get_vf_config(struct net_device *dev, int vfidx,
 
 	ivi->vf = vfidx;
 	ivi->qos = 0;
-	ivi->tx_rate = 10000; /* always 10G. TBA take from link struct */
-	ivi->spoofchk = 1; /*always enabled */
+	ivi->max_tx_rate = 10000; /* always 10G. TBA take from link struct */
+	ivi->min_tx_rate = 0;
+	ivi->spoofchk = vf->spoofchk ? 1 : 0;
+	ivi->linkstate = vf->link_cfg;
 	if (vf->state == VF_ENABLED) {
 		/* mac and vlan are in vlan_mac objects */
 		if (bnx2x_validate_vf_sp_objs(bp, vf, false)) {
@@ -2563,13 +2653,14 @@ int bnx2x_get_vf_config(struct net_device *dev, int vfidx,
 						 VLAN_HLEN);
 		}
 	} else {
+		mutex_lock(&bp->vfdb->bulletin_mutex);
 		/* mac */
 		if (bulletin->valid_bitmap & (1 << MAC_ADDR_VALID))
 			/* mac configured by ndo so its in bulletin board */
 			memcpy(&ivi->mac, bulletin->mac, ETH_ALEN);
 		else
 			/* function has not been loaded yet. Show mac as 0s */
-			memset(&ivi->mac, 0, ETH_ALEN);
+			eth_zero_addr(ivi->mac);
 
 		/* vlan */
 		if (bulletin->valid_bitmap & (1 << VLAN_VALID))
@@ -2578,6 +2669,8 @@ int bnx2x_get_vf_config(struct net_device *dev, int vfidx,
 		else
 			/* function has not been loaded yet. Show vlans as 0s */
 			memset(&ivi->vlan, 0, VLAN_HLEN);
+
+		mutex_unlock(&bp->vfdb->bulletin_mutex);
 	}
 
 	return 0;
@@ -2607,14 +2700,17 @@ int bnx2x_set_vf_mac(struct net_device *dev, int vfidx, u8 *mac)
 	struct bnx2x_virtf *vf = NULL;
 	struct pf_vf_bulletin_content *bulletin = NULL;
 
-	/* sanity and init */
-	rc = bnx2x_vf_ndo_prep(bp, vfidx, &vf, &bulletin);
-	if (rc)
-		return rc;
 	if (!is_valid_ether_addr(mac)) {
 		BNX2X_ERR("mac address invalid\n");
 		return -EINVAL;
 	}
+
+	/* sanity and init */
+	rc = bnx2x_vf_op_prep(bp, vfidx, &vf, &bulletin, true);
+	if (rc)
+		return rc;
+
+	mutex_lock(&bp->vfdb->bulletin_mutex);
 
 	/* update PF's copy of the VF's bulletin. Will no longer accept mac
 	 * configuration requests from vf unless match this mac
@@ -2624,6 +2720,10 @@ int bnx2x_set_vf_mac(struct net_device *dev, int vfidx, u8 *mac)
 
 	/* Post update on VF's bulletin board */
 	rc = bnx2x_post_vf_bulletin(bp, vfidx);
+
+	/* release lock before checking return code */
+	mutex_unlock(&bp->vfdb->bulletin_mutex);
+
 	if (rc) {
 		BNX2X_ERR("failed to update VF[%d] bulletin\n", vfidx);
 		return rc;
@@ -2670,36 +2770,78 @@ out:
 		bnx2x_unlock_vf_pf_channel(bp, vf, CHANNEL_TLV_PF_SET_MAC);
 	}
 
+	return rc;
+}
+
+static void bnx2x_set_vf_vlan_acceptance(struct bnx2x *bp,
+					 struct bnx2x_virtf *vf, bool accept)
+{
+	struct bnx2x_rx_mode_ramrod_params rx_ramrod;
+	unsigned long accept_flags;
+
+	/* need to remove/add the VF's accept_any_vlan bit */
+	accept_flags = bnx2x_leading_vfq(vf, accept_flags);
+	if (accept)
+		set_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags);
+	else
+		clear_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags);
+
+	bnx2x_vf_prep_rx_mode(bp, LEADING_IDX, &rx_ramrod, vf,
+			      accept_flags);
+	bnx2x_leading_vfq(vf, accept_flags) = accept_flags;
+	bnx2x_config_rx_mode(bp, &rx_ramrod);
+}
+
+static int bnx2x_set_vf_vlan_filter(struct bnx2x *bp, struct bnx2x_virtf *vf,
+				    u16 vlan, bool add)
+{
+	struct bnx2x_vlan_mac_ramrod_params ramrod_param;
+	unsigned long ramrod_flags = 0;
+	int rc = 0;
+
+	/* configure the new vlan to device */
+	memset(&ramrod_param, 0, sizeof(ramrod_param));
+	__set_bit(RAMROD_COMP_WAIT, &ramrod_flags);
+	ramrod_param.vlan_mac_obj = &bnx2x_leading_vfq(vf, vlan_obj);
+	ramrod_param.ramrod_flags = ramrod_flags;
+	ramrod_param.user_req.u.vlan.vlan = vlan;
+	ramrod_param.user_req.cmd = add ? BNX2X_VLAN_MAC_ADD
+					: BNX2X_VLAN_MAC_DEL;
+	rc = bnx2x_config_vlan_mac(bp, &ramrod_param);
+	if (rc) {
+		BNX2X_ERR("failed to configure vlan\n");
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
-int bnx2x_set_vf_vlan(struct net_device *dev, int vfidx, u16 vlan, u8 qos)
+int bnx2x_set_vf_vlan(struct net_device *dev, int vfidx, u16 vlan, u8 qos,
+		      __be16 vlan_proto)
 {
-	struct bnx2x_queue_state_params q_params = {NULL};
-	struct bnx2x_vlan_mac_ramrod_params ramrod_param;
-	struct bnx2x_queue_update_params *update_params;
 	struct pf_vf_bulletin_content *bulletin = NULL;
-	struct bnx2x_rx_mode_ramrod_params rx_ramrod;
 	struct bnx2x *bp = netdev_priv(dev);
 	struct bnx2x_vlan_mac_obj *vlan_obj;
 	unsigned long vlan_mac_flags = 0;
 	unsigned long ramrod_flags = 0;
 	struct bnx2x_virtf *vf = NULL;
-	unsigned long accept_flags;
-	int rc;
-
-	/* sanity and init */
-	rc = bnx2x_vf_ndo_prep(bp, vfidx, &vf, &bulletin);
-	if (rc)
-		return rc;
+	int i, rc;
 
 	if (vlan > 4095) {
 		BNX2X_ERR("illegal vlan value %d\n", vlan);
 		return -EINVAL;
 	}
 
+	if (vlan_proto != htons(ETH_P_8021Q))
+		return -EPROTONOSUPPORT;
+
 	DP(BNX2X_MSG_IOV, "configuring VF %d with VLAN %d qos %d\n",
 	   vfidx, vlan, 0);
+
+	/* sanity and init */
+	rc = bnx2x_vf_op_prep(bp, vfidx, &vf, &bulletin, true);
+	if (rc)
+		return rc;
 
 	/* update PF's copy of the VF's bulletin. No point in posting the vlan
 	 * to the VF since it doesn't have anything to do with it. But it useful
@@ -2707,11 +2849,19 @@ int bnx2x_set_vf_vlan(struct net_device *dev, int vfidx, u16 vlan, u8 qos)
 	 * configure the vlan later when it does. Treat vlan id 0 as remove the
 	 * Host tag.
 	 */
+	mutex_lock(&bp->vfdb->bulletin_mutex);
+
 	if (vlan > 0)
 		bulletin->valid_bitmap |= 1 << VLAN_VALID;
 	else
 		bulletin->valid_bitmap &= ~(1 << VLAN_VALID);
 	bulletin->vlan = vlan;
+
+	/* Post update on VF's bulletin board */
+	rc = bnx2x_post_vf_bulletin(bp, vfidx);
+	if (rc)
+		BNX2X_ERR("failed to update VF[%d] bulletin\n", vfidx);
+	mutex_unlock(&bp->vfdb->bulletin_mutex);
 
 	/* is vf initialized and queue set up? */
 	if (vf->state != VF_ENABLED ||
@@ -2737,83 +2887,146 @@ int bnx2x_set_vf_vlan(struct net_device *dev, int vfidx, u16 vlan, u8 qos)
 		goto out;
 	}
 
-	/* need to remove/add the VF's accept_any_vlan bit */
-	accept_flags = bnx2x_leading_vfq(vf, accept_flags);
-	if (vlan)
-		clear_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags);
-	else
-		set_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags);
-
-	bnx2x_vf_prep_rx_mode(bp, LEADING_IDX, &rx_ramrod, vf,
-			      accept_flags);
-	bnx2x_leading_vfq(vf, accept_flags) = accept_flags;
-	bnx2x_config_rx_mode(bp, &rx_ramrod);
-
-	/* configure the new vlan to device */
-	memset(&ramrod_param, 0, sizeof(ramrod_param));
-	__set_bit(RAMROD_COMP_WAIT, &ramrod_flags);
-	ramrod_param.vlan_mac_obj = vlan_obj;
-	ramrod_param.ramrod_flags = ramrod_flags;
-	set_bit(BNX2X_DONT_CONSUME_CAM_CREDIT,
-		&ramrod_param.user_req.vlan_mac_flags);
-	ramrod_param.user_req.u.vlan.vlan = vlan;
-	ramrod_param.user_req.cmd = BNX2X_VLAN_MAC_ADD;
-	rc = bnx2x_config_vlan_mac(bp, &ramrod_param);
-	if (rc) {
-		BNX2X_ERR("failed to configure vlan\n");
-		rc =  -EINVAL;
-		goto out;
-	}
-
-	/* send queue update ramrod to configure default vlan and silent
-	 * vlan removal
+	/* clear accept_any_vlan when HV forces vlan, otherwise
+	 * according to VF capabilities
 	 */
-	__set_bit(RAMROD_COMP_WAIT, &q_params.ramrod_flags);
-	q_params.cmd = BNX2X_Q_CMD_UPDATE;
-	q_params.q_obj = &bnx2x_leading_vfq(vf, sp_obj);
-	update_params = &q_params.params.update;
-	__set_bit(BNX2X_Q_UPDATE_DEF_VLAN_EN_CHNG,
-		  &update_params->update_flags);
-	__set_bit(BNX2X_Q_UPDATE_SILENT_VLAN_REM_CHNG,
-		  &update_params->update_flags);
-	if (vlan == 0) {
-		/* if vlan is 0 then we want to leave the VF traffic
-		 * untagged, and leave the incoming traffic untouched
-		 * (i.e. do not remove any vlan tags).
-		 */
-		__clear_bit(BNX2X_Q_UPDATE_DEF_VLAN_EN,
-			    &update_params->update_flags);
-		__clear_bit(BNX2X_Q_UPDATE_SILENT_VLAN_REM,
-			    &update_params->update_flags);
-	} else {
-		/* configure default vlan to vf queue and set silent
-		 * vlan removal (the vf remains unaware of this vlan).
-		 */
-		__set_bit(BNX2X_Q_UPDATE_DEF_VLAN_EN,
-			  &update_params->update_flags);
-		__set_bit(BNX2X_Q_UPDATE_SILENT_VLAN_REM,
-			  &update_params->update_flags);
-		update_params->def_vlan = vlan;
-		update_params->silent_removal_value =
-			vlan & VLAN_VID_MASK;
-		update_params->silent_removal_mask = VLAN_VID_MASK;
-	}
+	if (vlan || !(vf->cfg_flags & VF_CFG_VLAN_FILTER))
+		bnx2x_set_vf_vlan_acceptance(bp, vf, !vlan);
 
-	/* Update the Queue state */
-	rc = bnx2x_queue_state_change(bp, &q_params);
-	if (rc) {
-		BNX2X_ERR("Failed to configure default VLAN\n");
+	rc = bnx2x_set_vf_vlan_filter(bp, vf, vlan, true);
+	if (rc)
 		goto out;
-	}
 
-
-	/* clear the flag indicating that this VF needs its vlan
-	 * (will only be set if the HV configured the Vlan before vf was
-	 * up and we were called because the VF came up later
+	/* send queue update ramrods to configure default vlan and
+	 * silent vlan removal
 	 */
+	for_each_vfq(vf, i) {
+		struct bnx2x_queue_state_params q_params = {NULL};
+		struct bnx2x_queue_update_params *update_params;
+
+		q_params.q_obj = &bnx2x_vfq(vf, i, sp_obj);
+
+		/* validate the Q is UP */
+		if (bnx2x_get_q_logical_state(bp, q_params.q_obj) !=
+		    BNX2X_Q_LOGICAL_STATE_ACTIVE)
+			continue;
+
+		__set_bit(RAMROD_COMP_WAIT, &q_params.ramrod_flags);
+		q_params.cmd = BNX2X_Q_CMD_UPDATE;
+		update_params = &q_params.params.update;
+		__set_bit(BNX2X_Q_UPDATE_DEF_VLAN_EN_CHNG,
+			  &update_params->update_flags);
+		__set_bit(BNX2X_Q_UPDATE_SILENT_VLAN_REM_CHNG,
+			  &update_params->update_flags);
+		if (vlan == 0) {
+			/* if vlan is 0 then we want to leave the VF traffic
+			 * untagged, and leave the incoming traffic untouched
+			 * (i.e. do not remove any vlan tags).
+			 */
+			__clear_bit(BNX2X_Q_UPDATE_DEF_VLAN_EN,
+				    &update_params->update_flags);
+			__clear_bit(BNX2X_Q_UPDATE_SILENT_VLAN_REM,
+				    &update_params->update_flags);
+		} else {
+			/* configure default vlan to vf queue and set silent
+			 * vlan removal (the vf remains unaware of this vlan).
+			 */
+			__set_bit(BNX2X_Q_UPDATE_DEF_VLAN_EN,
+				  &update_params->update_flags);
+			__set_bit(BNX2X_Q_UPDATE_SILENT_VLAN_REM,
+				  &update_params->update_flags);
+			update_params->def_vlan = vlan;
+			update_params->silent_removal_value =
+				vlan & VLAN_VID_MASK;
+			update_params->silent_removal_mask = VLAN_VID_MASK;
+		}
+
+		/* Update the Queue state */
+		rc = bnx2x_queue_state_change(bp, &q_params);
+		if (rc) {
+			BNX2X_ERR("Failed to configure default VLAN queue %d\n",
+				  i);
+			goto out;
+		}
+	}
 out:
-	vf->cfg_flags &= ~VF_CFG_VLAN;
 	bnx2x_unlock_vf_pf_channel(bp, vf, CHANNEL_TLV_PF_SET_VLAN);
+
+	if (rc)
+		DP(BNX2X_MSG_IOV,
+		   "updated VF[%d] vlan configuration (vlan = %d)\n",
+		   vfidx, vlan);
+
+	return rc;
+}
+
+int bnx2x_set_vf_spoofchk(struct net_device *dev, int idx, bool val)
+{
+	struct bnx2x *bp = netdev_priv(dev);
+	struct bnx2x_virtf *vf;
+	int i, rc = 0;
+
+	vf = BP_VF(bp, idx);
+	if (!vf)
+		return -EINVAL;
+
+	/* nothing to do */
+	if (vf->spoofchk == val)
+		return 0;
+
+	vf->spoofchk = val ? 1 : 0;
+
+	DP(BNX2X_MSG_IOV, "%s spoofchk for VF %d\n",
+	   val ? "enabling" : "disabling", idx);
+
+	/* is vf initialized and queue set up? */
+	if (vf->state != VF_ENABLED ||
+	    bnx2x_get_q_logical_state(bp, &bnx2x_leading_vfq(vf, sp_obj)) !=
+	    BNX2X_Q_LOGICAL_STATE_ACTIVE)
+		return rc;
+
+	/* User should be able to see error in system logs */
+	if (!bnx2x_validate_vf_sp_objs(bp, vf, true))
+		return -EINVAL;
+
+	/* send queue update ramrods to configure spoofchk */
+	for_each_vfq(vf, i) {
+		struct bnx2x_queue_state_params q_params = {NULL};
+		struct bnx2x_queue_update_params *update_params;
+
+		q_params.q_obj = &bnx2x_vfq(vf, i, sp_obj);
+
+		/* validate the Q is UP */
+		if (bnx2x_get_q_logical_state(bp, q_params.q_obj) !=
+		    BNX2X_Q_LOGICAL_STATE_ACTIVE)
+			continue;
+
+		__set_bit(RAMROD_COMP_WAIT, &q_params.ramrod_flags);
+		q_params.cmd = BNX2X_Q_CMD_UPDATE;
+		update_params = &q_params.params.update;
+		__set_bit(BNX2X_Q_UPDATE_ANTI_SPOOF_CHNG,
+			  &update_params->update_flags);
+		if (val) {
+			__set_bit(BNX2X_Q_UPDATE_ANTI_SPOOF,
+				  &update_params->update_flags);
+		} else {
+			__clear_bit(BNX2X_Q_UPDATE_ANTI_SPOOF,
+				    &update_params->update_flags);
+		}
+
+		/* Update the Queue state */
+		rc = bnx2x_queue_state_change(bp, &q_params);
+		if (rc) {
+			BNX2X_ERR("Failed to %s spoofchk on VF %d - vfq %d\n",
+				  val ? "enable" : "disable", idx, i);
+			goto out;
+		}
+	}
+out:
+	if (!rc)
+		DP(BNX2X_MSG_IOV,
+		   "%s spoofchk for VF[%d]\n", val ? "Enabled" : "Disabled",
+		   idx);
 
 	return rc;
 }
@@ -2822,10 +3035,9 @@ out:
  * entire bulletin board excluding the crc field itself. Use the length field
  * as the Bulletin Board was posted by a PF with possibly a different version
  * from the vf which will sample it. Therefore, the length is computed by the
- * PF and the used blindly by the VF.
+ * PF and then used blindly by the VF.
  */
-u32 bnx2x_crc_vf_bulletin(struct bnx2x *bp,
-			  struct pf_vf_bulletin_content *bulletin)
+u32 bnx2x_crc_vf_bulletin(struct pf_vf_bulletin_content *bulletin)
 {
 	return crc32(BULLETIN_CRC_SEED,
 		 ((u8 *)bulletin) + sizeof(bulletin->crc),
@@ -2835,47 +3047,74 @@ u32 bnx2x_crc_vf_bulletin(struct bnx2x *bp,
 /* Check for new posts on the bulletin board */
 enum sample_bulletin_result bnx2x_sample_bulletin(struct bnx2x *bp)
 {
-	struct pf_vf_bulletin_content bulletin = bp->pf2vf_bulletin->content;
+	struct pf_vf_bulletin_content *bulletin;
 	int attempts;
 
+	/* sampling structure in mid post may result with corrupted data
+	 * validate crc to ensure coherency.
+	 */
+	for (attempts = 0; attempts < BULLETIN_ATTEMPTS; attempts++) {
+		u32 crc;
+
+		/* sample the bulletin board */
+		memcpy(&bp->shadow_bulletin, bp->pf2vf_bulletin,
+		       sizeof(union pf_vf_bulletin));
+
+		crc = bnx2x_crc_vf_bulletin(&bp->shadow_bulletin.content);
+
+		if (bp->shadow_bulletin.content.crc == crc)
+			break;
+
+		BNX2X_ERR("bad crc on bulletin board. Contained %x computed %x\n",
+			  bp->shadow_bulletin.content.crc, crc);
+	}
+
+	if (attempts >= BULLETIN_ATTEMPTS) {
+		BNX2X_ERR("pf to vf bulletin board crc was wrong %d consecutive times. Aborting\n",
+			  attempts);
+		return PFVF_BULLETIN_CRC_ERR;
+	}
+	bulletin = &bp->shadow_bulletin.content;
+
 	/* bulletin board hasn't changed since last sample */
-	if (bp->old_bulletin.version == bulletin.version)
+	if (bp->old_bulletin.version == bulletin->version)
 		return PFVF_BULLETIN_UNCHANGED;
 
-	/* validate crc of new bulletin board */
-	if (bp->old_bulletin.version != bp->pf2vf_bulletin->content.version) {
-		/* sampling structure in mid post may result with corrupted data
-		 * validate crc to ensure coherency.
-		 */
-		for (attempts = 0; attempts < BULLETIN_ATTEMPTS; attempts++) {
-			bulletin = bp->pf2vf_bulletin->content;
-			if (bulletin.crc == bnx2x_crc_vf_bulletin(bp,
-								  &bulletin))
-				break;
-			BNX2X_ERR("bad crc on bulletin board. Contained %x computed %x\n",
-				  bulletin.crc,
-				  bnx2x_crc_vf_bulletin(bp, &bulletin));
-		}
-		if (attempts >= BULLETIN_ATTEMPTS) {
-			BNX2X_ERR("pf to vf bulletin board crc was wrong %d consecutive times. Aborting\n",
-				  attempts);
-			return PFVF_BULLETIN_CRC_ERR;
-		}
-	}
-
 	/* the mac address in bulletin board is valid and is new */
-	if (bulletin.valid_bitmap & 1 << MAC_ADDR_VALID &&
-	    !ether_addr_equal(bulletin.mac, bp->old_bulletin.mac)) {
+	if (bulletin->valid_bitmap & 1 << MAC_ADDR_VALID &&
+	    !ether_addr_equal(bulletin->mac, bp->old_bulletin.mac)) {
 		/* update new mac to net device */
-		memcpy(bp->dev->dev_addr, bulletin.mac, ETH_ALEN);
+		memcpy(bp->dev->dev_addr, bulletin->mac, ETH_ALEN);
 	}
 
-	/* the vlan in bulletin board is valid and is new */
-	if (bulletin.valid_bitmap & 1 << VLAN_VALID)
-		memcpy(&bulletin.vlan, &bp->old_bulletin.vlan, VLAN_HLEN);
+	if (bulletin->valid_bitmap & (1 << LINK_VALID)) {
+		DP(BNX2X_MSG_IOV, "link update speed %d flags %x\n",
+		   bulletin->link_speed, bulletin->link_flags);
+
+		bp->vf_link_vars.line_speed = bulletin->link_speed;
+		bp->vf_link_vars.link_report_flags = 0;
+		/* Link is down */
+		if (bulletin->link_flags & VFPF_LINK_REPORT_LINK_DOWN)
+			__set_bit(BNX2X_LINK_REPORT_LINK_DOWN,
+				  &bp->vf_link_vars.link_report_flags);
+		/* Full DUPLEX */
+		if (bulletin->link_flags & VFPF_LINK_REPORT_FULL_DUPLEX)
+			__set_bit(BNX2X_LINK_REPORT_FD,
+				  &bp->vf_link_vars.link_report_flags);
+		/* Rx Flow Control is ON */
+		if (bulletin->link_flags & VFPF_LINK_REPORT_RX_FC_ON)
+			__set_bit(BNX2X_LINK_REPORT_RX_FC_ON,
+				  &bp->vf_link_vars.link_report_flags);
+		/* Tx Flow Control is ON */
+		if (bulletin->link_flags & VFPF_LINK_REPORT_TX_FC_ON)
+			__set_bit(BNX2X_LINK_REPORT_TX_FC_ON,
+				  &bp->vf_link_vars.link_report_flags);
+		__bnx2x_link_report(bp);
+	}
 
 	/* copy new bulletin board to bp */
-	bp->old_bulletin = bulletin;
+	memcpy(&bp->old_bulletin, bulletin,
+	       sizeof(struct pf_vf_bulletin_content));
 
 	return PFVF_BULLETIN_UPDATED;
 }
@@ -2896,6 +3135,14 @@ void __iomem *bnx2x_vf_doorbells(struct bnx2x *bp)
 	return bp->regview + PXP_VF_ADDR_DB_START;
 }
 
+void bnx2x_vf_pci_dealloc(struct bnx2x *bp)
+{
+	BNX2X_PCI_FREE(bp->vf2pf_mbox, bp->vf2pf_mbox_mapping,
+		       sizeof(struct bnx2x_vf_mbx_msg));
+	BNX2X_PCI_FREE(bp->pf2vf_bulletin, bp->pf2vf_bulletin_mapping,
+		       sizeof(union pf_vf_bulletin));
+}
+
 int bnx2x_vf_pci_alloc(struct bnx2x *bp)
 {
 	mutex_init(&bp->vf2pf_mutex);
@@ -2912,13 +3159,12 @@ int bnx2x_vf_pci_alloc(struct bnx2x *bp)
 	if (!bp->pf2vf_bulletin)
 		goto alloc_mem_err;
 
+	bnx2x_vf_bulletin_finalize(&bp->pf2vf_bulletin->content, true);
+
 	return 0;
 
 alloc_mem_err:
-	BNX2X_PCI_FREE(bp->vf2pf_mbox, bp->vf2pf_mbox_mapping,
-		       sizeof(struct bnx2x_vf_mbx_msg));
-	BNX2X_PCI_FREE(bp->vf2pf_mbox, bp->pf2vf_bulletin_mapping,
-		       sizeof(union pf_vf_bulletin));
+	bnx2x_vf_pci_dealloc(bp);
 	return -ENOMEM;
 }
 
@@ -2960,9 +3206,9 @@ void bnx2x_iov_task(struct work_struct *work)
 
 void bnx2x_schedule_iov_task(struct bnx2x *bp, enum bnx2x_iov_flag flag)
 {
-	smp_mb__before_clear_bit();
+	smp_mb__before_atomic();
 	set_bit(flag, &bp->iov_task_state);
-	smp_mb__after_clear_bit();
+	smp_mb__after_atomic();
 	DP(BNX2X_MSG_IOV, "Scheduling iov task [Flag: %d]\n", flag);
 	queue_delayed_work(bnx2x_iov_wq, &bp->iov_task, 0);
 }

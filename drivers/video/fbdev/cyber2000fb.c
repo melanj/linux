@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/video/cyber2000fb.c
  *
@@ -8,10 +9,6 @@
  *
  *  32 bit support, text color and panning fixes for modes != 8 bit
  *  Copyright (C) 2002 Denis Oliver Kropp <dok@directfb.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Integraphics CyberPro 2000, 2010 and 5000 frame buffer device
  *
@@ -61,7 +58,6 @@
 struct cfb_info {
 	struct fb_info		fb;
 	struct display_switch	*dispsw;
-	struct display		*display;
 	unsigned char		__iomem *region;
 	unsigned char		__iomem *regs;
 	u_int			id;
@@ -159,7 +155,7 @@ cyber2000_seqw(unsigned int reg, unsigned int val, struct cfb_info *cfb)
 static void
 cyber2000fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	unsigned long dst, col;
 
 	if (!(cfb->fb.var.accel_flags & FB_ACCELF_TEXT)) {
@@ -191,7 +187,7 @@ cyber2000fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 static void
 cyber2000fb_copyarea(struct fb_info *info, const struct fb_copyarea *region)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	unsigned int cmd = CO_CMD_L_PATTERN_FGCOL;
 	unsigned long src, dst;
 
@@ -241,7 +237,7 @@ cyber2000fb_imageblit(struct fb_info *info, const struct fb_image *image)
 
 static int cyber2000fb_sync(struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	int count = 100000;
 
 	if (!(cfb->fb.var.accel_flags & FB_ACCELF_TEXT))
@@ -276,7 +272,7 @@ static int
 cyber2000fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 		      u_int transp, struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	struct fb_var_screeninfo *var = &cfb->fb.var;
 	u32 pseudo_val;
 	int ret = 1;
@@ -758,7 +754,7 @@ cyber2000fb_decode_clock(struct par_info *hw, struct cfb_info *cfb,
 static int
 cyber2000fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	struct par_info hw;
 	unsigned int mem;
 	int err;
@@ -861,7 +857,7 @@ cyber2000fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 
 static int cyber2000fb_set_par(struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	struct fb_var_screeninfo *var = &cfb->fb.var;
 	struct par_info hw;
 	unsigned int mem;
@@ -971,7 +967,7 @@ static int cyber2000fb_set_par(struct fb_info *info)
 static int
 cyber2000fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 
 	if (cyber2000fb_update_start(cfb, var))
 		return -EINVAL;
@@ -1007,7 +1003,7 @@ cyber2000fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
  */
 static int cyber2000fb_blank(int blank, struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct cfb_info *cfb = container_of(info, struct cfb_info, fb);
 	unsigned int sync = 0;
 	int i;
 
@@ -1064,7 +1060,7 @@ static int cyber2000fb_blank(int blank, struct fb_info *info)
 	return 0;
 }
 
-static struct fb_ops cyber2000fb_ops = {
+static const struct fb_ops cyber2000fb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_check_var	= cyber2000fb_check_var,
 	.fb_set_par	= cyber2000fb_set_par,
@@ -1336,7 +1332,7 @@ static void cyber2000fb_i2c_unregister(struct cfb_info *cfb)
  * These parameters give
  * 640x480, hsync 31.5kHz, vsync 60Hz
  */
-static struct fb_videomode cyber2000fb_default_mode = {
+static const struct fb_videomode cyber2000fb_default_mode = {
 	.refresh	= 60,
 	.xres		= 640,
 	.yres		= 480,
@@ -1642,10 +1638,6 @@ static void cyberpro_common_resume(struct cfb_info *cfb)
 }
 
 /*
- * PCI specific support.
- */
-#ifdef CONFIG_PCI
-/*
  * We need to wake up the CyberPro, and make sure its in linear memory
  * mode.  Unfortunately, this is specific to the platform and card that
  * we are running on.
@@ -1861,7 +1853,6 @@ static struct pci_driver cyberpro_driver = {
 	.resume		= cyberpro_pci_resume,
 	.id_table	= cyberpro_pci_table
 };
-#endif
 
 /*
  * I don't think we can use the "module_init" stuff here because

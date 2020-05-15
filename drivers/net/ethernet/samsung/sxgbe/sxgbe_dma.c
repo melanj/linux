@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* 10G controller driver for Samsung SoCs
  *
  * Copyright (C) 2013 Samsung Electronics Co., Ltd.
  *		http://www.samsung.com
  *
  * Author: Siva Reddy Kallam <siva.kallam@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/delay.h>
 #include <linux/export.h>
@@ -23,20 +20,7 @@
 /* DMA core initialization */
 static int sxgbe_dma_init(void __iomem *ioaddr, int fix_burst, int burst_map)
 {
-	int retry_count = 10;
 	u32 reg_val;
-
-	/* reset the DMA */
-	writel(SXGBE_DMA_SOFT_RESET, ioaddr + SXGBE_DMA_MODE_REG);
-	while (retry_count--) {
-		if (!(readl(ioaddr + SXGBE_DMA_MODE_REG) &
-		      SXGBE_DMA_SOFT_RESET))
-			break;
-		mdelay(10);
-	}
-
-	if (retry_count < 0)
-		return -EBUSY;
 
 	reg_val = readl(ioaddr + SXGBE_DMA_SYSBUS_MODE_REG);
 

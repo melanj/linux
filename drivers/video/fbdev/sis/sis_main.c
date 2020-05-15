@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SiS 300/540/630[S]/730[S],
  * SiS 315[E|PRO]/550/[M]65x/[M]66x[F|M|G]X/[M]74x[GX]/330/[M]76x[GX],
@@ -5,20 +6,6 @@
  * frame buffer driver for Linux kernels >= 2.4.14 and >=2.6.3
  *
  * Copyright (C) 2001-2005 Thomas Winischhofer, Vienna, Austria.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the named License,
- * or any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA
  *
  * Author:	Thomas Winischhofer <thomas@winischhofer.net>
  *
@@ -30,7 +17,6 @@
  *
  * Originally based on the VBE 2.0 compliant graphic boards framebuffer driver,
  * which is (c) 1998 Gerd Knorr <kraxel@goldbach.in-berlin.de>
- *
  */
 
 #include <linux/module.h>
@@ -53,20 +39,68 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <asm/io.h>
-#ifdef CONFIG_MTRR
-#include <asm/mtrr.h>
-#endif
 
 #include "sis.h"
 #include "sis_main.h"
+#include "init301.h"
 
 #if !defined(CONFIG_FB_SIS_300) && !defined(CONFIG_FB_SIS_315)
 #warning Neither CONFIG_FB_SIS_300 nor CONFIG_FB_SIS_315 is set
 #warning sisfb will not work!
 #endif
 
+/* ---------------------- Prototypes ------------------------- */
+
+/* Interface used by the world */
+#ifndef MODULE
+static int sisfb_setup(char *options);
+#endif
+
+/* Interface to the low level console driver */
+static int sisfb_init(void);
+
+/* fbdev routines */
+static int	sisfb_get_fix(struct fb_fix_screeninfo *fix, int con,
+				struct fb_info *info);
+
+static int	sisfb_ioctl(struct fb_info *info, unsigned int cmd,
+			    unsigned long arg);
+static int	sisfb_set_par(struct fb_info *info);
+static int	sisfb_blank(int blank,
+				struct fb_info *info);
+
 static void sisfb_handle_command(struct sis_video_info *ivideo,
 				 struct sisfb_cmd *sisfb_command);
+
+static void	sisfb_search_mode(char *name, bool quiet);
+static int	sisfb_validate_mode(struct sis_video_info *ivideo, int modeindex, u32 vbflags);
+static u8	sisfb_search_refresh_rate(struct sis_video_info *ivideo, unsigned int rate,
+				int index);
+static int	sisfb_setcolreg(unsigned regno, unsigned red, unsigned green,
+				unsigned blue, unsigned transp,
+				struct fb_info *fb_info);
+static int	sisfb_do_set_var(struct fb_var_screeninfo *var, int isactive,
+				struct fb_info *info);
+static void	sisfb_pre_setmode(struct sis_video_info *ivideo);
+static void	sisfb_post_setmode(struct sis_video_info *ivideo);
+static bool	sisfb_CheckVBRetrace(struct sis_video_info *ivideo);
+static bool	sisfbcheckvretracecrt2(struct sis_video_info *ivideo);
+static bool	sisfbcheckvretracecrt1(struct sis_video_info *ivideo);
+static bool	sisfb_bridgeisslave(struct sis_video_info *ivideo);
+static void	sisfb_detect_VB_connect(struct sis_video_info *ivideo);
+static void	sisfb_get_VB_type(struct sis_video_info *ivideo);
+static void	sisfb_set_TVxposoffset(struct sis_video_info *ivideo, int val);
+static void	sisfb_set_TVyposoffset(struct sis_video_info *ivideo, int val);
+
+/* Internal heap routines */
+static int		sisfb_heap_init(struct sis_video_info *ivideo);
+static struct SIS_OH *	sisfb_poh_new_node(struct SIS_HEAP *memheap);
+static struct SIS_OH *	sisfb_poh_allocate(struct SIS_HEAP *memheap, u32 size);
+static void		sisfb_delete_node(struct SIS_OH *poh);
+static void		sisfb_insert_node(struct SIS_OH *pohList, struct SIS_OH *poh);
+static struct SIS_OH *	sisfb_poh_free(struct SIS_HEAP *memheap, u32 base);
+static void		sisfb_free_node(struct SIS_HEAP *memheap, struct SIS_OH *poh);
+
 
 /* ------------------ Internal helper routines ----------------- */
 
@@ -162,7 +196,7 @@ static void sisfb_search_mode(char *name, bool quiet)
 		return;
 	}
 
-	if(!strnicmp(name, sisbios_mode[MODE_INDEX_NONE].name, strlen(name))) {
+	if(!strncasecmp(name, sisbios_mode[MODE_INDEX_NONE].name, strlen(name))) {
 		if(!quiet)
 			printk(KERN_ERR "sisfb: Mode 'none' not supported anymore. Using default.\n");
 
@@ -201,7 +235,7 @@ static void sisfb_search_mode(char *name, bool quiet)
 
 	i = 0; j = 0;
 	while(sisbios_mode[i].mode_no[0] != 0) {
-		if(!strnicmp(nameptr, sisbios_mode[i++].name, strlen(nameptr))) {
+		if(!strncasecmp(nameptr, sisbios_mode[i++].name, strlen(nameptr))) {
 			if(sisfb_fstn) {
 				if(sisbios_mode[i-1].mode_no[1] == 0x50 ||
 				   sisbios_mode[i-1].mode_no[1] == 0x56 ||
@@ -262,7 +296,7 @@ sisfb_search_crt2type(const char *name)
 	if(name == NULL) return;
 
 	while(sis_crt2type[i].type_no != -1) {
-		if(!strnicmp(name, sis_crt2type[i].name, strlen(sis_crt2type[i].name))) {
+		if(!strncasecmp(name, sis_crt2type[i].name, strlen(sis_crt2type[i].name))) {
 			sisfb_crt2type = sis_crt2type[i].type_no;
 			sisfb_tvplug = sis_crt2type[i].tvplug_no;
 			sisfb_crt2flags = sis_crt2type[i].flags;
@@ -289,7 +323,7 @@ sisfb_search_tvstd(const char *name)
 		return;
 
 	while(sis_tvtype[i].type_no != -1) {
-		if(!strnicmp(name, sis_tvtype[i].name, strlen(sis_tvtype[i].name))) {
+		if(!strncasecmp(name, sis_tvtype[i].name, strlen(sis_tvtype[i].name))) {
 			sisfb_tvstd = sis_tvtype[i].type_no;
 			break;
 		}
@@ -308,12 +342,12 @@ sisfb_search_specialtiming(const char *name)
 	if(name == NULL)
 		return;
 
-	if(!strnicmp(name, "none", 4)) {
+	if(!strncasecmp(name, "none", 4)) {
 		sisfb_specialtiming = CUT_FORCENONE;
 		printk(KERN_DEBUG "sisfb: Special timing disabled\n");
 	} else {
 		while(mycustomttable[i].chipID != 0) {
-			if(!strnicmp(name,mycustomttable[i].optionName,
+			if(!strncasecmp(name,mycustomttable[i].optionName,
 			   strlen(mycustomttable[i].optionName))) {
 				sisfb_specialtiming = mycustomttable[i].SpecialID;
 				found = true;
@@ -1572,10 +1606,6 @@ sisfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	/* Adapt RGB settings */
 	sisfb_bpp_to_var(ivideo, var);
 
-	/* Sanity check for offsets */
-	if(var->xoffset < 0) var->xoffset = 0;
-	if(var->yoffset < 0) var->yoffset = 0;
-
 	if(var->xres > var->xres_virtual)
 		var->xres_virtual = var->xres;
 
@@ -1709,6 +1739,7 @@ static int	sisfb_ioctl(struct fb_info *info, unsigned int cmd,
 		if(ivideo->warncount++ < 10)
 			printk(KERN_INFO
 				"sisfb: Deprecated ioctl call received - update your application!\n");
+		/* fall through */
 	   case SISFB_GET_INFO:  /* For communication with X driver */
 		ivideo->sisfb_infoblock.sisfb_id         = SISFB_ID;
 		ivideo->sisfb_infoblock.sisfb_version    = VER_MAJOR;
@@ -1762,6 +1793,7 @@ static int	sisfb_ioctl(struct fb_info *info, unsigned int cmd,
 		if(ivideo->warncount++ < 10)
 			printk(KERN_INFO
 				"sisfb: Deprecated ioctl call received - update your application!\n");
+		/* fall through */
 	   case SISFB_GET_VBRSTATUS:
 		if(sisfb_CheckVBRetrace(ivideo))
 			return put_user((u32)1, argp);
@@ -1772,6 +1804,7 @@ static int	sisfb_ioctl(struct fb_info *info, unsigned int cmd,
 		if(ivideo->warncount++ < 10)
 			printk(KERN_INFO
 				"sisfb: Deprecated ioctl call received - update your application!\n");
+		/* fall through */
 	   case SISFB_GET_AUTOMAXIMIZE:
 		if(ivideo->sisfb_max)
 			return put_user((u32)1, argp);
@@ -1782,6 +1815,7 @@ static int	sisfb_ioctl(struct fb_info *info, unsigned int cmd,
 		if(ivideo->warncount++ < 10)
 			printk(KERN_INFO
 				"sisfb: Deprecated ioctl call received - update your application!\n");
+		/* fall through */
 	   case SISFB_SET_AUTOMAXIMIZE:
 		if(get_user(gpu32, argp))
 			return -EFAULT;
@@ -1872,7 +1906,7 @@ sisfb_get_fix(struct fb_fix_screeninfo *fix, int con, struct fb_info *info)
 
 /* ----------------  fb_ops structures ----------------- */
 
-static struct fb_ops sisfb_ops = {
+static const struct fb_ops sisfb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= sisfb_open,
 	.fb_release	= sisfb_release,
@@ -3956,68 +3990,68 @@ static int __init sisfb_setup(char *options)
 
 		if(!(*this_opt)) continue;
 
-		if(!strnicmp(this_opt, "off", 3)) {
+		if(!strncasecmp(this_opt, "off", 3)) {
 			sisfb_off = 1;
-		} else if(!strnicmp(this_opt, "forcecrt2type:", 14)) {
+		} else if(!strncasecmp(this_opt, "forcecrt2type:", 14)) {
 			/* Need to check crt2 type first for fstn/dstn */
 			sisfb_search_crt2type(this_opt + 14);
-		} else if(!strnicmp(this_opt, "tvmode:",7)) {
+		} else if(!strncasecmp(this_opt, "tvmode:",7)) {
 			sisfb_search_tvstd(this_opt + 7);
-		} else if(!strnicmp(this_opt, "tvstandard:",11)) {
+		} else if(!strncasecmp(this_opt, "tvstandard:",11)) {
 			sisfb_search_tvstd(this_opt + 11);
-		} else if(!strnicmp(this_opt, "mode:", 5)) {
+		} else if(!strncasecmp(this_opt, "mode:", 5)) {
 			sisfb_search_mode(this_opt + 5, false);
-		} else if(!strnicmp(this_opt, "vesa:", 5)) {
+		} else if(!strncasecmp(this_opt, "vesa:", 5)) {
 			sisfb_search_vesamode(simple_strtoul(this_opt + 5, NULL, 0), false);
-		} else if(!strnicmp(this_opt, "rate:", 5)) {
+		} else if(!strncasecmp(this_opt, "rate:", 5)) {
 			sisfb_parm_rate = simple_strtoul(this_opt + 5, NULL, 0);
-		} else if(!strnicmp(this_opt, "forcecrt1:", 10)) {
+		} else if(!strncasecmp(this_opt, "forcecrt1:", 10)) {
 			sisfb_forcecrt1 = (int)simple_strtoul(this_opt + 10, NULL, 0);
-		} else if(!strnicmp(this_opt, "mem:",4)) {
+		} else if(!strncasecmp(this_opt, "mem:",4)) {
 			sisfb_parm_mem = simple_strtoul(this_opt + 4, NULL, 0);
-		} else if(!strnicmp(this_opt, "pdc:", 4)) {
+		} else if(!strncasecmp(this_opt, "pdc:", 4)) {
 			sisfb_pdc = simple_strtoul(this_opt + 4, NULL, 0);
-		} else if(!strnicmp(this_opt, "pdc1:", 5)) {
+		} else if(!strncasecmp(this_opt, "pdc1:", 5)) {
 			sisfb_pdca = simple_strtoul(this_opt + 5, NULL, 0);
-		} else if(!strnicmp(this_opt, "noaccel", 7)) {
+		} else if(!strncasecmp(this_opt, "noaccel", 7)) {
 			sisfb_accel = 0;
-		} else if(!strnicmp(this_opt, "accel", 5)) {
+		} else if(!strncasecmp(this_opt, "accel", 5)) {
 			sisfb_accel = -1;
-		} else if(!strnicmp(this_opt, "noypan", 6)) {
+		} else if(!strncasecmp(this_opt, "noypan", 6)) {
 			sisfb_ypan = 0;
-		} else if(!strnicmp(this_opt, "ypan", 4)) {
+		} else if(!strncasecmp(this_opt, "ypan", 4)) {
 			sisfb_ypan = -1;
-		} else if(!strnicmp(this_opt, "nomax", 5)) {
+		} else if(!strncasecmp(this_opt, "nomax", 5)) {
 			sisfb_max = 0;
-		} else if(!strnicmp(this_opt, "max", 3)) {
+		} else if(!strncasecmp(this_opt, "max", 3)) {
 			sisfb_max = -1;
-		} else if(!strnicmp(this_opt, "userom:", 7)) {
+		} else if(!strncasecmp(this_opt, "userom:", 7)) {
 			sisfb_userom = (int)simple_strtoul(this_opt + 7, NULL, 0);
-		} else if(!strnicmp(this_opt, "useoem:", 7)) {
+		} else if(!strncasecmp(this_opt, "useoem:", 7)) {
 			sisfb_useoem = (int)simple_strtoul(this_opt + 7, NULL, 0);
-		} else if(!strnicmp(this_opt, "nocrt2rate", 10)) {
+		} else if(!strncasecmp(this_opt, "nocrt2rate", 10)) {
 			sisfb_nocrt2rate = 1;
-		} else if(!strnicmp(this_opt, "scalelcd:", 9)) {
+		} else if(!strncasecmp(this_opt, "scalelcd:", 9)) {
 			unsigned long temp = 2;
 			temp = simple_strtoul(this_opt + 9, NULL, 0);
 			if((temp == 0) || (temp == 1)) {
 			   sisfb_scalelcd = temp ^ 1;
 			}
-		} else if(!strnicmp(this_opt, "tvxposoffset:", 13)) {
+		} else if(!strncasecmp(this_opt, "tvxposoffset:", 13)) {
 			int temp = 0;
 			temp = (int)simple_strtol(this_opt + 13, NULL, 0);
 			if((temp >= -32) && (temp <= 32)) {
 			   sisfb_tvxposoffset = temp;
 			}
-		} else if(!strnicmp(this_opt, "tvyposoffset:", 13)) {
+		} else if(!strncasecmp(this_opt, "tvyposoffset:", 13)) {
 			int temp = 0;
 			temp = (int)simple_strtol(this_opt + 13, NULL, 0);
 			if((temp >= -32) && (temp <= 32)) {
 			   sisfb_tvyposoffset = temp;
 			}
-		} else if(!strnicmp(this_opt, "specialtiming:", 14)) {
+		} else if(!strncasecmp(this_opt, "specialtiming:", 14)) {
 			sisfb_search_specialtiming(this_opt + 14);
-		} else if(!strnicmp(this_opt, "lvdshl:", 7)) {
+		} else if(!strncasecmp(this_opt, "lvdshl:", 7)) {
 			int temp = 4;
 			temp = simple_strtoul(this_opt + 7, NULL, 0);
 			if((temp >= 0) && (temp <= 3)) {
@@ -4026,9 +4060,9 @@ static int __init sisfb_setup(char *options)
 		} else if(this_opt[0] >= '0' && this_opt[0] <= '9') {
 			sisfb_search_mode(this_opt, true);
 #if !defined(__i386__) && !defined(__x86_64__)
-		} else if(!strnicmp(this_opt, "resetcard", 9)) {
+		} else if(!strncasecmp(this_opt, "resetcard", 9)) {
 			sisfb_resetcard = 1;
-	        } else if(!strnicmp(this_opt, "videoram:", 9)) {
+	        } else if(!strncasecmp(this_opt, "videoram:", 9)) {
 			sisfb_videoram = simple_strtoul(this_opt + 9, NULL, 0);
 #endif
 		} else {
@@ -4134,13 +4168,13 @@ static void sisfb_post_map_vram(struct sis_video_info *ivideo,
 	if (*mapsize < (min << 20))
 		return;
 
-	ivideo->video_vbase = ioremap(ivideo->video_base, (*mapsize));
+	ivideo->video_vbase = ioremap_wc(ivideo->video_base, (*mapsize));
 
 	if(!ivideo->video_vbase) {
 		printk(KERN_ERR
 			"sisfb: Unable to map maximum video RAM for size detection\n");
 		(*mapsize) >>= 1;
-		while((!(ivideo->video_vbase = ioremap(ivideo->video_base, (*mapsize))))) {
+		while((!(ivideo->video_vbase = ioremap_wc(ivideo->video_base, (*mapsize))))) {
 			(*mapsize) >>= 1;
 			if((*mapsize) < (min << 20))
 				break;
@@ -5834,7 +5868,7 @@ static int sisfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			ivideo->cardnumber++;
 	}
 
-	strncpy(ivideo->myid, chipinfo->chip_name, 30);
+	strlcpy(ivideo->myid, chipinfo->chip_name, sizeof(ivideo->myid));
 
 	ivideo->warncount = 0;
 	ivideo->chip_id = pdev->device;
@@ -5993,7 +6027,7 @@ static int sisfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	if(!ivideo->sisvga_enabled) {
 		if(pci_enable_device(pdev)) {
-			if(ivideo->nbridge) pci_dev_put(ivideo->nbridge);
+			pci_dev_put(ivideo->nbridge);
 			framebuffer_release(sis_fb_info);
 			return -EIO;
 		}
@@ -6190,7 +6224,7 @@ static int sisfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto error_2;
 	}
 
-	ivideo->video_vbase = ioremap(ivideo->video_base, ivideo->video_size);
+	ivideo->video_vbase = ioremap_wc(ivideo->video_base, ivideo->video_size);
 	ivideo->SiS_Pr.VideoMemoryAddress = ivideo->video_vbase;
 	if(!ivideo->video_vbase) {
 		printk(KERN_ERR "sisfb: Fatal error: Unable to map framebuffer memory\n");
@@ -6206,10 +6240,8 @@ error_0:	iounmap(ivideo->video_vbase);
 error_1:	release_mem_region(ivideo->video_base, ivideo->video_size);
 error_2:	release_mem_region(ivideo->mmio_base, ivideo->mmio_size);
 error_3:	vfree(ivideo->bios_abase);
-		if(ivideo->lpcdev)
-			pci_dev_put(ivideo->lpcdev);
-		if(ivideo->nbridge)
-			pci_dev_put(ivideo->nbridge);
+		pci_dev_put(ivideo->lpcdev);
+		pci_dev_put(ivideo->nbridge);
 		if(!ivideo->sisvga_enabled)
 			pci_disable_device(pdev);
 		framebuffer_release(sis_fb_info);
@@ -6259,8 +6291,6 @@ error_3:	vfree(ivideo->bios_abase);
 	/* Used for clearing the screen only, therefore respect our mem limit */
 	ivideo->SiS_Pr.VideoMemoryAddress += ivideo->video_offset;
 	ivideo->SiS_Pr.VideoMemorySize = ivideo->sisfb_mem;
-
-	ivideo->mtrr = -1;
 
 	ivideo->vbflags = 0;
 	ivideo->lcddefmodeidx = DEFAULT_LCDMODE;
@@ -6449,14 +6479,8 @@ error_3:	vfree(ivideo->bios_abase);
 
 		printk(KERN_DEBUG "sisfb: Initial vbflags 0x%x\n", (int)ivideo->vbflags);
 
-#ifdef CONFIG_MTRR
-		ivideo->mtrr = mtrr_add(ivideo->video_base, ivideo->video_size,
-					MTRR_TYPE_WRCOMB, 1);
-		if(ivideo->mtrr < 0) {
-			printk(KERN_DEBUG "sisfb: Failed to add MTRRs\n");
-		}
-#endif
-
+		ivideo->wc_cookie = arch_phys_wc_add(ivideo->video_base,
+						     ivideo->video_size);
 		if(register_framebuffer(sis_fb_info) < 0) {
 			printk(KERN_ERR "sisfb: Fatal error: Failed to register framebuffer\n");
 			ret = -EINVAL;
@@ -6509,17 +6533,11 @@ static void sisfb_remove(struct pci_dev *pdev)
 
 	vfree(ivideo->bios_abase);
 
-	if(ivideo->lpcdev)
-		pci_dev_put(ivideo->lpcdev);
+	pci_dev_put(ivideo->lpcdev);
 
-	if(ivideo->nbridge)
-		pci_dev_put(ivideo->nbridge);
+	pci_dev_put(ivideo->nbridge);
 
-#ifdef CONFIG_MTRR
-	/* Release MTRR region */
-	if(ivideo->mtrr >= 0)
-		mtrr_del(ivideo->mtrr, ivideo->video_base, ivideo->video_size);
-#endif
+	arch_phys_wc_del(ivideo->wc_cookie);
 
 	/* If device was disabled when starting, disable
 	 * it when quitting.

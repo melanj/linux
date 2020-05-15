@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Altera Triple-Speed Ethernet MAC driver
  * Copyright (C) 2008-2014 Altera Corporation. All rights reserved
  *
@@ -14,18 +15,6 @@
  *
  * Original driver contributed by SLS.
  * Major updates contributed by GlobalLogic
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/atomic.h>
@@ -37,6 +26,7 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mii.h>
 #include <linux/netdevice.h>
 #include <linux/of_device.h>
 #include <linux/of_mdio.h>
@@ -55,7 +45,7 @@
 static atomic_t instance_count = ATOMIC_INIT(~0);
 /* Module parameters */
 static int debug = -1;
-module_param(debug, int, S_IRUGO | S_IWUSR);
+module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "Message Level (-1: default, 0: no output, 16: all)");
 
 static const u32 default_msg_level = (NETIF_MSG_DRV | NETIF_MSG_PROBE |
@@ -64,12 +54,12 @@ static const u32 default_msg_level = (NETIF_MSG_DRV | NETIF_MSG_PROBE |
 
 #define RX_DESCRIPTORS 64
 static int dma_rx_num = RX_DESCRIPTORS;
-module_param(dma_rx_num, int, S_IRUGO | S_IWUSR);
+module_param(dma_rx_num, int, 0644);
 MODULE_PARM_DESC(dma_rx_num, "Number of descriptors in the RX list");
 
 #define TX_DESCRIPTORS 64
 static int dma_tx_num = TX_DESCRIPTORS;
-module_param(dma_tx_num, int, S_IRUGO | S_IWUSR);
+module_param(dma_tx_num, int, 0644);
 MODULE_PARM_DESC(dma_tx_num, "Number of descriptors in the TX list");
 
 
@@ -89,40 +79,62 @@ MODULE_PARM_DESC(dma_tx_num, "Number of descriptors in the TX list");
 
 #define TXQUEUESTOP_THRESHHOLD	2
 
-static struct of_device_id altera_tse_ids[];
+static const struct of_device_id altera_tse_ids[];
 
 static inline u32 tse_tx_avail(struct altera_tse_private *priv)
 {
 	return priv->tx_cons + priv->tx_ring_size - priv->tx_prod - 1;
 }
 
+/* PCS Register read/write functions
+ */
+static u16 sgmii_pcs_read(struct altera_tse_private *priv, int regnum)
+{
+	return csrrd32(priv->mac_dev,
+		       tse_csroffs(mdio_phy0) + regnum * 4) & 0xffff;
+}
+
+static void sgmii_pcs_write(struct altera_tse_private *priv, int regnum,
+				u16 value)
+{
+	csrwr32(value, priv->mac_dev, tse_csroffs(mdio_phy0) + regnum * 4);
+}
+
+/* Check PCS scratch memory */
+static int sgmii_pcs_scratch_test(struct altera_tse_private *priv, u16 value)
+{
+	sgmii_pcs_write(priv, SGMII_PCS_SCRATCH, value);
+	return (sgmii_pcs_read(priv, SGMII_PCS_SCRATCH) == value);
+}
+
 /* MDIO specific functions
  */
 static int altera_tse_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
 {
-	struct altera_tse_mac *mac = (struct altera_tse_mac *)bus->priv;
-	unsigned int *mdio_regs = (unsigned int *)&mac->mdio_phy0;
-	u32 data;
+	struct net_device *ndev = bus->priv;
+	struct altera_tse_private *priv = netdev_priv(ndev);
 
 	/* set MDIO address */
-	iowrite32((mii_id & 0x1f), &mac->mdio_phy0_addr);
+	csrwr32((mii_id & 0x1f), priv->mac_dev,
+		tse_csroffs(mdio_phy1_addr));
 
 	/* get the data */
-	data = ioread32(&mdio_regs[regnum]) & 0xffff;
-	return data;
+	return csrrd32(priv->mac_dev,
+		       tse_csroffs(mdio_phy1) + regnum * 4) & 0xffff;
 }
 
 static int altera_tse_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
 				 u16 value)
 {
-	struct altera_tse_mac *mac = (struct altera_tse_mac *)bus->priv;
-	unsigned int *mdio_regs = (unsigned int *)&mac->mdio_phy0;
+	struct net_device *ndev = bus->priv;
+	struct altera_tse_private *priv = netdev_priv(ndev);
 
 	/* set MDIO address */
-	iowrite32((mii_id & 0x1f), &mac->mdio_phy0_addr);
+	csrwr32((mii_id & 0x1f), priv->mac_dev,
+		tse_csroffs(mdio_phy1_addr));
 
 	/* write the data */
-	iowrite32((u32) value, &mdio_regs[regnum]);
+	csrwr32(value, priv->mac_dev, tse_csroffs(mdio_phy1) + regnum * 4);
 	return 0;
 }
 
@@ -130,7 +142,6 @@ static int altera_tse_mdio_create(struct net_device *dev, unsigned int id)
 {
 	struct altera_tse_private *priv = netdev_priv(dev);
 	int ret;
-	int i;
 	struct device_node *mdio_node = NULL;
 	struct mii_bus *mdio = NULL;
 	struct device_node *child_node = NULL;
@@ -160,22 +171,14 @@ static int altera_tse_mdio_create(struct net_device *dev, unsigned int id)
 	mdio->write = &altera_tse_mdio_write;
 	snprintf(mdio->id, MII_BUS_ID_SIZE, "%s-%u", mdio->name, id);
 
-	mdio->irq = kcalloc(PHY_MAX_ADDR, sizeof(int), GFP_KERNEL);
-	if (mdio->irq == NULL) {
-		ret = -ENOMEM;
-		goto out_free_mdio;
-	}
-	for (i = 0; i < PHY_MAX_ADDR; i++)
-		mdio->irq[i] = PHY_POLL;
-
-	mdio->priv = priv->mac_dev;
+	mdio->priv = dev;
 	mdio->parent = priv->device;
 
 	ret = of_mdiobus_register(mdio, mdio_node);
 	if (ret != 0) {
 		netdev_err(dev, "Cannot register MDIO bus %s\n",
 			   mdio->id);
-		goto out_free_mdio_irq;
+		goto out_free_mdio;
 	}
 
 	if (netif_msg_drv(priv))
@@ -183,8 +186,6 @@ static int altera_tse_mdio_create(struct net_device *dev, unsigned int id)
 
 	priv->mdio = mdio;
 	return 0;
-out_free_mdio_irq:
-	kfree(mdio->irq);
 out_free_mdio:
 	mdiobus_free(mdio);
 	mdio = NULL;
@@ -203,7 +204,6 @@ static void altera_tse_mdio_destroy(struct net_device *dev)
 			    priv->mdio->id);
 
 	mdiobus_unregister(priv->mdio);
-	kfree(priv->mdio->irq);
 	mdiobus_free(priv->mdio);
 	priv->mdio = NULL;
 }
@@ -224,6 +224,7 @@ static int tse_init_rx_buffer(struct altera_tse_private *priv,
 		dev_kfree_skb_any(rxbuffer->skb);
 		return -EINVAL;
 	}
+	rxbuffer->dma_addr &= (dma_addr_t)~3;
 	rxbuffer->len = len;
 	return 0;
 }
@@ -374,7 +375,13 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 	u16 pktlength;
 	u16 pktstatus;
 
-	while ((rxstatus = priv->dmaops->get_rx_status(priv)) != 0) {
+	/* Check for count < limit first as get_rx_status is changing
+	* the response-fifo so we must process the next packet
+	* after calling get_rx_status if a response is pending.
+	* (reading the last byte of the response pops the value from the fifo.)
+	*/
+	while ((count < limit) &&
+	       ((rxstatus = priv->dmaops->get_rx_status(priv)) != 0)) {
 		pktstatus = rxstatus >> 16;
 		pktlength = rxstatus & 0xffff;
 
@@ -382,6 +389,12 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 			netdev_err(priv->dev,
 				   "RCV pktstatus %08X pktlength %08X\n",
 				   pktstatus, pktlength);
+
+		/* DMA trasfer from TSE starts with 2 aditional bytes for
+		 * IP payload alignment. Status returned by get_rx_status()
+		 * contains DMA transfer length. Packet is 2 bytes shorter.
+		 */
+		pktlength -= 2;
 
 		count++;
 		next_entry = (++priv->rx_cons) % priv->rx_ring_size;
@@ -397,12 +410,6 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 		priv->rx_ring[entry].skb = NULL;
 
 		skb_put(skb, pktlength);
-
-		/* make cache consistent with receive packet buffer */
-		dma_sync_single_for_cpu(priv->device,
-					priv->rx_ring[entry].dma_addr,
-					priv->rx_ring[entry].len,
-					DMA_FROM_DEVICE);
 
 		dma_unmap_single(priv->device, priv->rx_ring[entry].dma_addr,
 				 priv->rx_ring[entry].len, DMA_FROM_DEVICE);
@@ -425,9 +432,10 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 		priv->dev->stats.rx_bytes += pktlength;
 
 		entry = next_entry;
+
+		tse_rx_refill(priv);
 	}
 
-	tse_rx_refill(priv);
 	return count;
 }
 
@@ -466,7 +474,6 @@ static int tse_tx_complete(struct altera_tse_private *priv)
 
 	if (unlikely(netif_queue_stopped(priv->dev) &&
 		     tse_tx_avail(priv) > TSE_TX_THRESH(priv))) {
-		netif_tx_lock(priv->dev);
 		if (netif_queue_stopped(priv->dev) &&
 		    tse_tx_avail(priv) > TSE_TX_THRESH(priv)) {
 			if (netif_msg_tx_done(priv))
@@ -474,7 +481,6 @@ static int tse_tx_complete(struct altera_tse_private *priv)
 					   __func__);
 			netif_wake_queue(priv->dev);
 		}
-		netif_tx_unlock(priv->dev);
 	}
 
 	spin_unlock(&priv->tx_lock);
@@ -488,28 +494,26 @@ static int tse_poll(struct napi_struct *napi, int budget)
 	struct altera_tse_private *priv =
 			container_of(napi, struct altera_tse_private, napi);
 	int rxcomplete = 0;
-	int txcomplete = 0;
 	unsigned long int flags;
 
-	txcomplete = tse_tx_complete(priv);
+	tse_tx_complete(priv);
 
 	rxcomplete = tse_rx(priv, budget);
 
-	if (rxcomplete >= budget || txcomplete > 0)
-		return rxcomplete;
+	if (rxcomplete < budget) {
 
-	napi_gro_flush(napi, false);
-	__napi_complete(napi);
+		napi_complete_done(napi, rxcomplete);
 
-	netdev_dbg(priv->dev,
-		   "NAPI Complete, did %d packets with budget %d\n",
-		   txcomplete+rxcomplete, budget);
+		netdev_dbg(priv->dev,
+			   "NAPI Complete, did %d packets with budget %d\n",
+			   rxcomplete, budget);
 
-	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
-	priv->dmaops->enable_rxirq(priv);
-	priv->dmaops->enable_txirq(priv);
-	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
-	return rxcomplete + txcomplete;
+		spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
+		priv->dmaops->enable_rxirq(priv);
+		priv->dmaops->enable_txirq(priv);
+		spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+	}
+	return rxcomplete;
 }
 
 /* DMA TX & RX FIFO interrupt routing
@@ -518,8 +522,6 @@ static irqreturn_t altera_isr(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct altera_tse_private *priv;
-	unsigned long int flags;
-
 
 	if (unlikely(!dev)) {
 		pr_err("%s: invalid dev pointer\n", __func__);
@@ -527,20 +529,20 @@ static irqreturn_t altera_isr(int irq, void *dev_id)
 	}
 	priv = netdev_priv(dev);
 
-	/* turn off desc irqs and enable napi rx */
-	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
-
-	if (likely(napi_schedule_prep(&priv->napi))) {
-		priv->dmaops->disable_rxirq(priv);
-		priv->dmaops->disable_txirq(priv);
-		__napi_schedule(&priv->napi);
-	}
-
+	spin_lock(&priv->rxdma_irq_lock);
 	/* reset IRQs */
 	priv->dmaops->clear_rxirq(priv);
 	priv->dmaops->clear_txirq(priv);
+	spin_unlock(&priv->rxdma_irq_lock);
 
-	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+	if (likely(napi_schedule_prep(&priv->napi))) {
+		spin_lock(&priv->rxdma_irq_lock);
+		priv->dmaops->disable_rxirq(priv);
+		priv->dmaops->disable_txirq(priv);
+		spin_unlock(&priv->rxdma_irq_lock);
+		__napi_schedule(&priv->napi);
+	}
+
 
 	return IRQ_HANDLED;
 }
@@ -562,7 +564,6 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	unsigned int nopaged_len = skb_headlen(skb);
 	enum netdev_tx ret = NETDEV_TX_OK;
 	dma_addr_t dma_addr;
-	int txcomplete = 0;
 
 	spin_lock_bh(&priv->tx_lock);
 
@@ -594,11 +595,7 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	buffer->dma_addr = dma_addr;
 	buffer->len = nopaged_len;
 
-	/* Push data out of the cache hierarchy into main memory */
-	dma_sync_single_for_device(priv->device, buffer->dma_addr,
-				   buffer->len, DMA_TO_DEVICE);
-
-	txcomplete = priv->dmaops->tx_buffer(priv, buffer);
+	priv->dmaops->tx_buffer(priv, buffer);
 
 	skb_tx_timestamp(skb);
 
@@ -627,7 +624,7 @@ out:
 static void altera_tse_adjust_link(struct net_device *dev)
 {
 	struct altera_tse_private *priv = netdev_priv(dev);
-	struct phy_device *phydev = priv->phydev;
+	struct phy_device *phydev = dev->phydev;
 	int new_state = 0;
 
 	/* only change config if there is a link */
@@ -697,7 +694,6 @@ static struct phy_device *connect_local_phy(struct net_device *dev)
 	struct altera_tse_private *priv = netdev_priv(dev);
 	struct phy_device *phydev = NULL;
 	char phy_id_fmt[MII_BUS_ID_SIZE + 3];
-	int ret;
 
 	if (priv->phy_addr != POLL_PHY) {
 		snprintf(phy_id_fmt, MII_BUS_ID_SIZE + 3, PHY_ID_FMT,
@@ -707,10 +703,13 @@ static struct phy_device *connect_local_phy(struct net_device *dev)
 
 		phydev = phy_connect(dev, phy_id_fmt, &altera_tse_adjust_link,
 				     priv->phy_iface);
-		if (IS_ERR(phydev))
+		if (IS_ERR(phydev)) {
 			netdev_err(dev, "Could not attach to PHY\n");
+			phydev = NULL;
+		}
 
 	} else {
+		int ret;
 		phydev = phy_find_first(priv->mdio);
 		if (phydev == NULL) {
 			netdev_err(dev, "No PHY found\n");
@@ -727,6 +726,44 @@ static struct phy_device *connect_local_phy(struct net_device *dev)
 	return phydev;
 }
 
+static int altera_tse_phy_get_addr_mdio_create(struct net_device *dev)
+{
+	struct altera_tse_private *priv = netdev_priv(dev);
+	struct device_node *np = priv->device->of_node;
+	int ret;
+
+	ret = of_get_phy_mode(np, &priv->phy_iface);
+
+	/* Avoid get phy addr and create mdio if no phy is present */
+	if (ret)
+		return 0;
+
+	/* try to get PHY address from device tree, use PHY autodetection if
+	 * no valid address is given
+	 */
+
+	if (of_property_read_u32(priv->device->of_node, "phy-addr",
+			 &priv->phy_addr)) {
+		priv->phy_addr = POLL_PHY;
+	}
+
+	if (!((priv->phy_addr == POLL_PHY) ||
+		  ((priv->phy_addr >= 0) && (priv->phy_addr < PHY_MAX_ADDR)))) {
+		netdev_err(dev, "invalid phy-addr specified %d\n",
+			priv->phy_addr);
+		return -ENODEV;
+	}
+
+	/* Create/attach to MDIO bus */
+	ret = altera_tse_mdio_create(dev,
+					 atomic_add_return(1, &instance_count));
+
+	if (ret)
+		return -ENODEV;
+
+	return 0;
+}
+
 /* Initialize driver's PHY state, and attach to the PHY
  */
 static int init_phy(struct net_device *dev)
@@ -734,6 +771,12 @@ static int init_phy(struct net_device *dev)
 	struct altera_tse_private *priv = netdev_priv(dev);
 	struct phy_device *phydev;
 	struct device_node *phynode;
+	bool fixed_link = false;
+	int rc = 0;
+
+	/* Avoid init phy in case of no phy present */
+	if (!priv->phy_iface)
+		return 0;
 
 	priv->oldlink = 0;
 	priv->oldspeed = 0;
@@ -742,55 +785,72 @@ static int init_phy(struct net_device *dev)
 	phynode = of_parse_phandle(priv->device->of_node, "phy-handle", 0);
 
 	if (!phynode) {
-		netdev_dbg(dev, "no phy-handle found\n");
-		if (!priv->mdio) {
-			netdev_err(dev,
-				   "No phy-handle nor local mdio specified\n");
-			return -ENODEV;
+		/* check if a fixed-link is defined in device-tree */
+		if (of_phy_is_fixed_link(priv->device->of_node)) {
+			rc = of_phy_register_fixed_link(priv->device->of_node);
+			if (rc < 0) {
+				netdev_err(dev, "cannot register fixed PHY\n");
+				return rc;
+			}
+
+			/* In the case of a fixed PHY, the DT node associated
+			 * to the PHY is the Ethernet MAC DT node.
+			 */
+			phynode = of_node_get(priv->device->of_node);
+			fixed_link = true;
+
+			netdev_dbg(dev, "fixed-link detected\n");
+			phydev = of_phy_connect(dev, phynode,
+						&altera_tse_adjust_link,
+						0, priv->phy_iface);
+		} else {
+			netdev_dbg(dev, "no phy-handle found\n");
+			if (!priv->mdio) {
+				netdev_err(dev, "No phy-handle nor local mdio specified\n");
+				return -ENODEV;
+			}
+			phydev = connect_local_phy(dev);
 		}
-		phydev = connect_local_phy(dev);
 	} else {
 		netdev_dbg(dev, "phy-handle found\n");
 		phydev = of_phy_connect(dev, phynode,
 			&altera_tse_adjust_link, 0, priv->phy_iface);
 	}
+	of_node_put(phynode);
 
 	if (!phydev) {
 		netdev_err(dev, "Could not find the PHY\n");
+		if (fixed_link)
+			of_phy_deregister_fixed_link(priv->device->of_node);
 		return -ENODEV;
 	}
 
 	/* Stop Advertising 1000BASE Capability if interface is not GMII
-	 * Note: Checkpatch throws CHECKs for the camel case defines below,
-	 * it's ok to ignore.
 	 */
 	if ((priv->phy_iface == PHY_INTERFACE_MODE_MII) ||
 	    (priv->phy_iface == PHY_INTERFACE_MODE_RMII))
-		phydev->advertising &= ~(SUPPORTED_1000baseT_Half |
-					 SUPPORTED_1000baseT_Full);
+		phy_set_max_speed(phydev, SPEED_100);
 
 	/* Broken HW is sometimes missing the pull-up resistor on the
 	 * MDIO line, which results in reads to non-existent devices returning
 	 * 0 rather than 0xffff. Catch this here and treat 0 as a non-existent
-	 * device as well.
+	 * device as well. If a fixed-link is used the phy_id is always 0.
 	 * Note: phydev->phy_id is the result of reading the UID PHY registers.
 	 */
-	if (phydev->phy_id == 0) {
+	if ((phydev->phy_id == 0) && !fixed_link) {
 		netdev_err(dev, "Bad PHY UID 0x%08x\n", phydev->phy_id);
 		phy_disconnect(phydev);
 		return -ENODEV;
 	}
 
 	netdev_dbg(dev, "attached to PHY %d UID 0x%08x Link = %d\n",
-		   phydev->addr, phydev->phy_id, phydev->link);
+		   phydev->mdio.addr, phydev->phy_id, phydev->link);
 
-	priv->phydev = phydev;
 	return 0;
 }
 
 static void tse_update_mac_addr(struct altera_tse_private *priv, u8 *addr)
 {
-	struct altera_tse_mac *mac = priv->mac_dev;
 	u32 msb;
 	u32 lsb;
 
@@ -798,8 +858,8 @@ static void tse_update_mac_addr(struct altera_tse_private *priv, u8 *addr)
 	lsb = ((addr[5] << 8) | addr[4]) & 0xffff;
 
 	/* Set primary MAC address */
-	iowrite32(msb, &mac->mac_addr_0);
-	iowrite32(lsb, &mac->mac_addr_1);
+	csrwr32(msb, priv->mac_dev, tse_csroffs(mac_addr_0));
+	csrwr32(lsb, priv->mac_dev, tse_csroffs(mac_addr_1));
 }
 
 /* MAC software reset.
@@ -810,26 +870,26 @@ static void tse_update_mac_addr(struct altera_tse_private *priv, u8 *addr)
  */
 static int reset_mac(struct altera_tse_private *priv)
 {
-	void __iomem *cmd_cfg_reg = &priv->mac_dev->command_config;
 	int counter;
 	u32 dat;
 
-	dat = ioread32(cmd_cfg_reg);
+	dat = csrrd32(priv->mac_dev, tse_csroffs(command_config));
 	dat &= ~(MAC_CMDCFG_TX_ENA | MAC_CMDCFG_RX_ENA);
 	dat |= MAC_CMDCFG_SW_RESET | MAC_CMDCFG_CNT_RESET;
-	iowrite32(dat, cmd_cfg_reg);
+	csrwr32(dat, priv->mac_dev, tse_csroffs(command_config));
 
 	counter = 0;
 	while (counter++ < ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
-		if (tse_bit_is_clear(cmd_cfg_reg, MAC_CMDCFG_SW_RESET))
+		if (tse_bit_is_clear(priv->mac_dev, tse_csroffs(command_config),
+				     MAC_CMDCFG_SW_RESET))
 			break;
 		udelay(1);
 	}
 
 	if (counter >= ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
-		dat = ioread32(cmd_cfg_reg);
+		dat = csrrd32(priv->mac_dev, tse_csroffs(command_config));
 		dat &= ~MAC_CMDCFG_SW_RESET;
-		iowrite32(dat, cmd_cfg_reg);
+		csrwr32(dat, priv->mac_dev, tse_csroffs(command_config));
 		return -1;
 	}
 	return 0;
@@ -839,42 +899,58 @@ static int reset_mac(struct altera_tse_private *priv)
 */
 static int init_mac(struct altera_tse_private *priv)
 {
-	struct altera_tse_mac *mac = priv->mac_dev;
 	unsigned int cmd = 0;
 	u32 frm_length;
 
 	/* Setup Rx FIFO */
-	iowrite32(priv->rx_fifo_depth - ALTERA_TSE_RX_SECTION_EMPTY,
-		  &mac->rx_section_empty);
-	iowrite32(ALTERA_TSE_RX_SECTION_FULL, &mac->rx_section_full);
-	iowrite32(ALTERA_TSE_RX_ALMOST_EMPTY, &mac->rx_almost_empty);
-	iowrite32(ALTERA_TSE_RX_ALMOST_FULL, &mac->rx_almost_full);
+	csrwr32(priv->rx_fifo_depth - ALTERA_TSE_RX_SECTION_EMPTY,
+		priv->mac_dev, tse_csroffs(rx_section_empty));
+
+	csrwr32(ALTERA_TSE_RX_SECTION_FULL, priv->mac_dev,
+		tse_csroffs(rx_section_full));
+
+	csrwr32(ALTERA_TSE_RX_ALMOST_EMPTY, priv->mac_dev,
+		tse_csroffs(rx_almost_empty));
+
+	csrwr32(ALTERA_TSE_RX_ALMOST_FULL, priv->mac_dev,
+		tse_csroffs(rx_almost_full));
 
 	/* Setup Tx FIFO */
-	iowrite32(priv->tx_fifo_depth - ALTERA_TSE_TX_SECTION_EMPTY,
-		  &mac->tx_section_empty);
-	iowrite32(ALTERA_TSE_TX_SECTION_FULL, &mac->tx_section_full);
-	iowrite32(ALTERA_TSE_TX_ALMOST_EMPTY, &mac->tx_almost_empty);
-	iowrite32(ALTERA_TSE_TX_ALMOST_FULL, &mac->tx_almost_full);
+	csrwr32(priv->tx_fifo_depth - ALTERA_TSE_TX_SECTION_EMPTY,
+		priv->mac_dev, tse_csroffs(tx_section_empty));
+
+	csrwr32(ALTERA_TSE_TX_SECTION_FULL, priv->mac_dev,
+		tse_csroffs(tx_section_full));
+
+	csrwr32(ALTERA_TSE_TX_ALMOST_EMPTY, priv->mac_dev,
+		tse_csroffs(tx_almost_empty));
+
+	csrwr32(ALTERA_TSE_TX_ALMOST_FULL, priv->mac_dev,
+		tse_csroffs(tx_almost_full));
 
 	/* MAC Address Configuration */
 	tse_update_mac_addr(priv, priv->dev->dev_addr);
 
 	/* MAC Function Configuration */
 	frm_length = ETH_HLEN + priv->dev->mtu + ETH_FCS_LEN;
-	iowrite32(frm_length, &mac->frm_length);
-	iowrite32(ALTERA_TSE_TX_IPG_LENGTH, &mac->tx_ipg_length);
+	csrwr32(frm_length, priv->mac_dev, tse_csroffs(frm_length));
+
+	csrwr32(ALTERA_TSE_TX_IPG_LENGTH, priv->mac_dev,
+		tse_csroffs(tx_ipg_length));
 
 	/* Disable RX/TX shift 16 for alignment of all received frames on 16-bit
 	 * start address
 	 */
-	tse_clear_bit(&mac->rx_cmd_stat, ALTERA_TSE_RX_CMD_STAT_RX_SHIFT16);
-	tse_clear_bit(&mac->tx_cmd_stat, ALTERA_TSE_TX_CMD_STAT_TX_SHIFT16 |
-					 ALTERA_TSE_TX_CMD_STAT_OMIT_CRC);
+	tse_set_bit(priv->mac_dev, tse_csroffs(rx_cmd_stat),
+		    ALTERA_TSE_RX_CMD_STAT_RX_SHIFT16);
+
+	tse_clear_bit(priv->mac_dev, tse_csroffs(tx_cmd_stat),
+		      ALTERA_TSE_TX_CMD_STAT_TX_SHIFT16 |
+		      ALTERA_TSE_TX_CMD_STAT_OMIT_CRC);
 
 	/* Set the MAC options */
-	cmd = ioread32(&mac->command_config);
-	cmd |= MAC_CMDCFG_PAD_EN;	/* Padding Removal on Receive */
+	cmd = csrrd32(priv->mac_dev, tse_csroffs(command_config));
+	cmd &= ~MAC_CMDCFG_PAD_EN;	/* No padding Removal on Receive */
 	cmd &= ~MAC_CMDCFG_CRC_FWD;	/* CRC Removal */
 	cmd |= MAC_CMDCFG_RX_ERR_DISC;	/* Automatically discard frames
 					 * with CRC errors
@@ -882,7 +958,16 @@ static int init_mac(struct altera_tse_private *priv)
 	cmd |= MAC_CMDCFG_CNTL_FRM_ENA;
 	cmd &= ~MAC_CMDCFG_TX_ENA;
 	cmd &= ~MAC_CMDCFG_RX_ENA;
-	iowrite32(cmd, &mac->command_config);
+
+	/* Default speed and duplex setting, full/100 */
+	cmd &= ~MAC_CMDCFG_HD_ENA;
+	cmd &= ~MAC_CMDCFG_ETH_SPEED;
+	cmd &= ~MAC_CMDCFG_ENA_10;
+
+	csrwr32(cmd, priv->mac_dev, tse_csroffs(command_config));
+
+	csrwr32(ALTERA_TSE_PAUSE_QUANTA, priv->mac_dev,
+		tse_csroffs(pause_quanta));
 
 	if (netif_msg_hw(priv))
 		dev_dbg(priv->device,
@@ -895,33 +980,23 @@ static int init_mac(struct altera_tse_private *priv)
  */
 static void tse_set_mac(struct altera_tse_private *priv, bool enable)
 {
-	struct altera_tse_mac *mac = priv->mac_dev;
-	u32 value = ioread32(&mac->command_config);
+	u32 value = csrrd32(priv->mac_dev, tse_csroffs(command_config));
 
 	if (enable)
 		value |= MAC_CMDCFG_TX_ENA | MAC_CMDCFG_RX_ENA;
 	else
 		value &= ~(MAC_CMDCFG_TX_ENA | MAC_CMDCFG_RX_ENA);
 
-	iowrite32(value, &mac->command_config);
+	csrwr32(value, priv->mac_dev, tse_csroffs(command_config));
 }
 
 /* Change the MTU
  */
 static int tse_change_mtu(struct net_device *dev, int new_mtu)
 {
-	struct altera_tse_private *priv = netdev_priv(dev);
-	unsigned int max_mtu = priv->max_mtu;
-	unsigned int min_mtu = ETH_ZLEN + ETH_FCS_LEN;
-
 	if (netif_running(dev)) {
 		netdev_err(dev, "must be stopped to change its MTU\n");
 		return -EBUSY;
-	}
-
-	if ((new_mtu < min_mtu) || (new_mtu > max_mtu)) {
-		netdev_err(dev, "invalid MTU, max MTU is: %u\n", max_mtu);
-		return -EINVAL;
 	}
 
 	dev->mtu = new_mtu;
@@ -933,13 +1008,12 @@ static int tse_change_mtu(struct net_device *dev, int new_mtu)
 static void altera_tse_set_mcfilter(struct net_device *dev)
 {
 	struct altera_tse_private *priv = netdev_priv(dev);
-	struct altera_tse_mac *mac = priv->mac_dev;
 	int i;
 	struct netdev_hw_addr *ha;
 
 	/* clear the hash filter */
 	for (i = 0; i < 64; i++)
-		iowrite32(0, &(mac->hash_table[i]));
+		csrwr32(0, priv->mac_dev, tse_csroffs(hash_table) + i * 4);
 
 	netdev_for_each_mc_addr(ha, dev) {
 		unsigned int hash = 0;
@@ -955,7 +1029,7 @@ static void altera_tse_set_mcfilter(struct net_device *dev)
 
 			hash = (hash << 1) | xor_bit;
 		}
-		iowrite32(1, &(mac->hash_table[hash]));
+		csrwr32(1, priv->mac_dev, tse_csroffs(hash_table) + hash * 4);
 	}
 }
 
@@ -963,12 +1037,11 @@ static void altera_tse_set_mcfilter(struct net_device *dev)
 static void altera_tse_set_mcfilterall(struct net_device *dev)
 {
 	struct altera_tse_private *priv = netdev_priv(dev);
-	struct altera_tse_mac *mac = priv->mac_dev;
 	int i;
 
 	/* set the hash filter */
 	for (i = 0; i < 64; i++)
-		iowrite32(1, &(mac->hash_table[i]));
+		csrwr32(1, priv->mac_dev, tse_csroffs(hash_table) + i * 4);
 }
 
 /* Set or clear the multicast filter for this adaptor
@@ -976,12 +1049,12 @@ static void altera_tse_set_mcfilterall(struct net_device *dev)
 static void tse_set_rx_mode_hashfilter(struct net_device *dev)
 {
 	struct altera_tse_private *priv = netdev_priv(dev);
-	struct altera_tse_mac *mac = priv->mac_dev;
 
 	spin_lock(&priv->mac_cfg_lock);
 
 	if (dev->flags & IFF_PROMISC)
-		tse_set_bit(&mac->command_config, MAC_CMDCFG_PROMIS_EN);
+		tse_set_bit(priv->mac_dev, tse_csroffs(command_config),
+			    MAC_CMDCFG_PROMIS_EN);
 
 	if (dev->flags & IFF_ALLMULTI)
 		altera_tse_set_mcfilterall(dev);
@@ -996,17 +1069,78 @@ static void tse_set_rx_mode_hashfilter(struct net_device *dev)
 static void tse_set_rx_mode(struct net_device *dev)
 {
 	struct altera_tse_private *priv = netdev_priv(dev);
-	struct altera_tse_mac *mac = priv->mac_dev;
 
 	spin_lock(&priv->mac_cfg_lock);
 
 	if ((dev->flags & IFF_PROMISC) || (dev->flags & IFF_ALLMULTI) ||
 	    !netdev_mc_empty(dev) || !netdev_uc_empty(dev))
-		tse_set_bit(&mac->command_config, MAC_CMDCFG_PROMIS_EN);
+		tse_set_bit(priv->mac_dev, tse_csroffs(command_config),
+			    MAC_CMDCFG_PROMIS_EN);
 	else
-		tse_clear_bit(&mac->command_config, MAC_CMDCFG_PROMIS_EN);
+		tse_clear_bit(priv->mac_dev, tse_csroffs(command_config),
+			      MAC_CMDCFG_PROMIS_EN);
 
 	spin_unlock(&priv->mac_cfg_lock);
+}
+
+/* Initialise (if necessary) the SGMII PCS component
+ */
+static int init_sgmii_pcs(struct net_device *dev)
+{
+	struct altera_tse_private *priv = netdev_priv(dev);
+	int n;
+	unsigned int tmp_reg = 0;
+
+	if (priv->phy_iface != PHY_INTERFACE_MODE_SGMII)
+		return 0; /* Nothing to do, not in SGMII mode */
+
+	/* The TSE SGMII PCS block looks a little like a PHY, it is
+	 * mapped into the zeroth MDIO space of the MAC and it has
+	 * ID registers like a PHY would.  Sadly this is often
+	 * configured to zeroes, so don't be surprised if it does
+	 * show 0x00000000.
+	 */
+
+	if (sgmii_pcs_scratch_test(priv, 0x0000) &&
+		sgmii_pcs_scratch_test(priv, 0xffff) &&
+		sgmii_pcs_scratch_test(priv, 0xa5a5) &&
+		sgmii_pcs_scratch_test(priv, 0x5a5a)) {
+		netdev_info(dev, "PCS PHY ID: 0x%04x%04x\n",
+				sgmii_pcs_read(priv, MII_PHYSID1),
+				sgmii_pcs_read(priv, MII_PHYSID2));
+	} else {
+		netdev_err(dev, "SGMII PCS Scratch memory test failed.\n");
+		return -ENOMEM;
+	}
+
+	/* Starting on page 5-29 of the MegaCore Function User Guide
+	 * Set SGMII Link timer to 1.6ms
+	 */
+	sgmii_pcs_write(priv, SGMII_PCS_LINK_TIMER_0, 0x0D40);
+	sgmii_pcs_write(priv, SGMII_PCS_LINK_TIMER_1, 0x03);
+
+	/* Enable SGMII Interface and Enable SGMII Auto Negotiation */
+	sgmii_pcs_write(priv, SGMII_PCS_IF_MODE, 0x3);
+
+	/* Enable Autonegotiation */
+	tmp_reg = sgmii_pcs_read(priv, MII_BMCR);
+	tmp_reg |= (BMCR_SPEED1000 | BMCR_FULLDPLX | BMCR_ANENABLE);
+	sgmii_pcs_write(priv, MII_BMCR, tmp_reg);
+
+	/* Reset PCS block */
+	tmp_reg |= BMCR_RESET;
+	sgmii_pcs_write(priv, MII_BMCR, tmp_reg);
+	for (n = 0; n < SGMII_PCS_SW_RESET_TIMEOUT; n++) {
+		if (!(sgmii_pcs_read(priv, MII_BMCR) & BMCR_RESET)) {
+			netdev_info(dev, "SGMII PCS block initialised OK\n");
+			return 0;
+		}
+		udelay(1);
+	}
+
+	/* We failed to reset the block, return a timeout */
+	netdev_err(dev, "SGMII PCS block reset failed.\n");
+	return -ETIMEDOUT;
 }
 
 /* Open and initialize the interface
@@ -1033,9 +1167,22 @@ static int tse_open(struct net_device *dev)
 		netdev_warn(dev, "TSE revision %x\n", priv->revision);
 
 	spin_lock(&priv->mac_cfg_lock);
+	/* no-op if MAC not operating in SGMII mode*/
+	ret = init_sgmii_pcs(dev);
+	if (ret) {
+		netdev_err(dev,
+			   "Cannot init the SGMII PCS (error: %d)\n", ret);
+		spin_unlock(&priv->mac_cfg_lock);
+		goto phy_error;
+	}
+
 	ret = reset_mac(priv);
+	/* Note that reset_mac will fail if the clocks are gated by the PHY
+	 * due to the PHY being put into isolation or power down mode.
+	 * This is not an error if reset fails due to no clock.
+	 */
 	if (ret)
-		netdev_err(dev, "Cannot reset MAC core (error: %d)\n", ret);
+		netdev_dbg(dev, "Cannot reset MAC core (error: %d)\n", ret);
 
 	ret = init_mac(priv);
 	spin_unlock(&priv->mac_cfg_lock);
@@ -1085,16 +1232,18 @@ static int tse_open(struct net_device *dev)
 
 	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 
+	if (dev->phydev)
+		phy_start(dev->phydev);
+
+	napi_enable(&priv->napi);
+	netif_start_queue(dev);
+
+	priv->dmaops->start_rxdma(priv);
+
 	/* Start MAC Rx/Tx */
 	spin_lock(&priv->mac_cfg_lock);
 	tse_set_mac(priv, true);
 	spin_unlock(&priv->mac_cfg_lock);
-
-	if (priv->phydev)
-		phy_start(priv->phydev);
-
-	napi_enable(&priv->napi);
-	netif_start_queue(dev);
 
 	return 0;
 
@@ -1103,10 +1252,6 @@ tx_request_irq_error:
 init_error:
 	free_skbufs(dev);
 alloc_skbuf_error:
-	if (priv->phydev) {
-		phy_disconnect(priv->phydev);
-		priv->phydev = NULL;
-	}
 phy_error:
 	return ret;
 }
@@ -1119,12 +1264,9 @@ static int tse_shutdown(struct net_device *dev)
 	int ret;
 	unsigned long int flags;
 
-	/* Stop and disconnect the PHY */
-	if (priv->phydev) {
-		phy_stop(priv->phydev);
-		phy_disconnect(priv->phydev);
-		priv->phydev = NULL;
-	}
+	/* Stop the PHY */
+	if (dev->phydev)
+		phy_stop(dev->phydev);
 
 	netif_stop_queue(dev);
 	napi_disable(&priv->napi);
@@ -1144,8 +1286,12 @@ static int tse_shutdown(struct net_device *dev)
 	spin_lock(&priv->tx_lock);
 
 	ret = reset_mac(priv);
+	/* Note that reset_mac will fail if the clocks are gated by the PHY
+	 * due to the PHY being put into isolation or power down mode.
+	 * This is not an error if reset fails due to no clock.
+	 */
 	if (ret)
-		netdev_err(dev, "Cannot reset MAC core (error: %d)\n", ret);
+		netdev_dbg(dev, "Cannot reset MAC core (error: %d)\n", ret);
 	priv->dmaops->reset_dma(priv);
 	free_skbufs(dev);
 
@@ -1167,7 +1313,6 @@ static struct net_device_ops altera_tse_netdev_ops = {
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
-
 static int request_and_map(struct platform_device *pdev, const char *name,
 			   struct resource **res, void __iomem **ptr)
 {
@@ -1187,10 +1332,10 @@ static int request_and_map(struct platform_device *pdev, const char *name,
 		return -EBUSY;
 	}
 
-	*ptr = devm_ioremap_nocache(device, region->start,
+	*ptr = devm_ioremap(device, region->start,
 				    resource_size(region));
 	if (*ptr == NULL) {
-		dev_err(device, "ioremap_nocache of %s failed!", name);
+		dev_err(device, "ioremap of %s failed!", name);
 		return -ENOMEM;
 	}
 
@@ -1207,7 +1352,6 @@ static int altera_tse_probe(struct platform_device *pdev)
 	struct resource *dma_res;
 	struct altera_tse_private *priv;
 	const unsigned char *macaddr;
-	struct device_node *np = pdev->dev.of_node;
 	void __iomem *descmap;
 	const struct of_device_id *of_id = NULL;
 
@@ -1235,7 +1379,7 @@ static int altera_tse_probe(struct platform_device *pdev)
 		/* Get the mapped address to the SGDMA descriptor memory */
 		ret = request_and_map(pdev, "s1", &dma_res, &descmap);
 		if (ret)
-			goto out_free;
+			goto err_free_netdev;
 
 		/* Start of that memory is for transmit descriptors */
 		priv->tx_dma_desc = descmap;
@@ -1254,24 +1398,26 @@ static int altera_tse_probe(struct platform_device *pdev)
 		if (upper_32_bits(priv->rxdescmem_busaddr)) {
 			dev_dbg(priv->device,
 				"SGDMA bus addresses greater than 32-bits\n");
-			goto out_free;
+			ret = -EINVAL;
+			goto err_free_netdev;
 		}
 		if (upper_32_bits(priv->txdescmem_busaddr)) {
 			dev_dbg(priv->device,
 				"SGDMA bus addresses greater than 32-bits\n");
-			goto out_free;
+			ret = -EINVAL;
+			goto err_free_netdev;
 		}
 	} else if (priv->dmaops &&
 		   priv->dmaops->altera_dtype == ALTERA_DTYPE_MSGDMA) {
 		ret = request_and_map(pdev, "rx_resp", &dma_res,
 				      &priv->rx_dma_resp);
 		if (ret)
-			goto out_free;
+			goto err_free_netdev;
 
 		ret = request_and_map(pdev, "tx_desc", &dma_res,
 				      &priv->tx_dma_desc);
 		if (ret)
-			goto out_free;
+			goto err_free_netdev;
 
 		priv->txdescmem = resource_size(dma_res);
 		priv->txdescmem_busaddr = dma_res->start;
@@ -1279,13 +1425,13 @@ static int altera_tse_probe(struct platform_device *pdev)
 		ret = request_and_map(pdev, "rx_desc", &dma_res,
 				      &priv->rx_dma_desc);
 		if (ret)
-			goto out_free;
+			goto err_free_netdev;
 
 		priv->rxdescmem = resource_size(dma_res);
 		priv->rxdescmem_busaddr = dma_res->start;
 
 	} else {
-		goto out_free;
+		goto err_free_netdev;
 	}
 
 	if (!dma_set_mask(priv->device, DMA_BIT_MASK(priv->dmaops->dmamask)))
@@ -1294,26 +1440,26 @@ static int altera_tse_probe(struct platform_device *pdev)
 	else if (!dma_set_mask(priv->device, DMA_BIT_MASK(32)))
 		dma_set_coherent_mask(priv->device, DMA_BIT_MASK(32));
 	else
-		goto out_free;
+		goto err_free_netdev;
 
 	/* MAC address space */
 	ret = request_and_map(pdev, "control_port", &control_port,
 			      (void __iomem **)&priv->mac_dev);
 	if (ret)
-		goto out_free;
+		goto err_free_netdev;
 
 	/* xSGDMA Rx Dispatcher address space */
 	ret = request_and_map(pdev, "rx_csr", &dma_res,
 			      &priv->rx_dma_csr);
 	if (ret)
-		goto out_free;
+		goto err_free_netdev;
 
 
 	/* xSGDMA Tx Dispatcher address space */
 	ret = request_and_map(pdev, "tx_csr", &dma_res,
 			      &priv->tx_dma_csr);
 	if (ret)
-		goto out_free;
+		goto err_free_netdev;
 
 
 	/* Rx IRQ */
@@ -1321,7 +1467,7 @@ static int altera_tse_probe(struct platform_device *pdev)
 	if (priv->rx_irq == -ENXIO) {
 		dev_err(&pdev->dev, "cannot obtain Rx IRQ\n");
 		ret = -ENXIO;
-		goto out_free;
+		goto err_free_netdev;
 	}
 
 	/* Tx IRQ */
@@ -1329,7 +1475,7 @@ static int altera_tse_probe(struct platform_device *pdev)
 	if (priv->tx_irq == -ENXIO) {
 		dev_err(&pdev->dev, "cannot obtain Tx IRQ\n");
 		ret = -ENXIO;
-		goto out_free;
+		goto err_free_netdev;
 	}
 
 	/* get FIFO depths from device tree */
@@ -1337,14 +1483,14 @@ static int altera_tse_probe(struct platform_device *pdev)
 				 &priv->rx_fifo_depth)) {
 		dev_err(&pdev->dev, "cannot obtain rx-fifo-depth\n");
 		ret = -ENXIO;
-		goto out_free;
+		goto err_free_netdev;
 	}
 
 	if (of_property_read_u32(pdev->dev.of_node, "tx-fifo-depth",
-				 &priv->rx_fifo_depth)) {
+				 &priv->tx_fifo_depth)) {
 		dev_err(&pdev->dev, "cannot obtain tx-fifo-depth\n");
 		ret = -ENXIO;
-		goto out_free;
+		goto err_free_netdev;
 	}
 
 	/* get hash filter settings for this instance */
@@ -1352,20 +1498,26 @@ static int altera_tse_probe(struct platform_device *pdev)
 		of_property_read_bool(pdev->dev.of_node,
 				      "altr,has-hash-multicast-filter");
 
+	/* Set hash filter to not set for now until the
+	 * multicast filter receive issue is debugged
+	 */
+	priv->hash_filter = 0;
+
 	/* get supplemental address settings for this instance */
 	priv->added_unicast =
 		of_property_read_bool(pdev->dev.of_node,
 				      "altr,has-supplementary-unicast");
 
+	priv->dev->min_mtu = ETH_ZLEN + ETH_FCS_LEN;
 	/* Max MTU is 1500, ETH_DATA_LEN */
-	priv->max_mtu = ETH_DATA_LEN;
+	priv->dev->max_mtu = ETH_DATA_LEN;
 
 	/* Get the max mtu from the device tree. Note that the
 	 * "max-frame-size" parameter is actually max mtu. Definition
 	 * in the ePAPR v1.1 spec and usage differ, so go with usage.
 	 */
 	of_property_read_u32(pdev->dev.of_node, "max-frame-size",
-			     &priv->max_mtu);
+			     &priv->dev->max_mtu);
 
 	/* The DMA buffer size already accounts for an alignment bias
 	 * to avoid unaligned access exceptions for the NIOS processor,
@@ -1374,37 +1526,18 @@ static int altera_tse_probe(struct platform_device *pdev)
 
 	/* get default MAC address from device tree */
 	macaddr = of_get_mac_address(pdev->dev.of_node);
-	if (macaddr)
+	if (!IS_ERR(macaddr))
 		ether_addr_copy(ndev->dev_addr, macaddr);
 	else
 		eth_hw_addr_random(ndev);
 
-	priv->phy_iface = of_get_phy_mode(np);
-
-	/* try to get PHY address from device tree, use PHY autodetection if
-	 * no valid address is given
-	 */
-	if (of_property_read_u32(pdev->dev.of_node, "phy-addr",
-				 &priv->phy_addr)) {
-		priv->phy_addr = POLL_PHY;
-	}
-
-	if (!((priv->phy_addr == POLL_PHY) ||
-	      ((priv->phy_addr >= 0) && (priv->phy_addr < PHY_MAX_ADDR)))) {
-		dev_err(&pdev->dev, "invalid phy-addr specified %d\n",
-			priv->phy_addr);
-		goto out_free;
-	}
-
-	/* Create/attach to MDIO bus */
-	ret = altera_tse_mdio_create(ndev,
-				     atomic_add_return(1, &instance_count));
+	/* get phy addr and create mdio */
+	ret = altera_tse_phy_get_addr_mdio_create(ndev);
 
 	if (ret)
-		goto out_free;
+		goto err_free_netdev;
 
 	/* initialize netdev */
-	ether_setup(ndev);
 	ndev->mem_start = control_port->start;
 	ndev->mem_end = control_port->end;
 	ndev->netdev_ops = &altera_tse_netdev_ops;
@@ -1435,10 +1568,11 @@ static int altera_tse_probe(struct platform_device *pdev)
 	spin_lock_init(&priv->tx_lock);
 	spin_lock_init(&priv->rxdma_irq_lock);
 
+	netif_carrier_off(ndev);
 	ret = register_netdev(ndev);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to register TSE net device\n");
-		goto out_free_mdio;
+		goto err_register_netdev;
 	}
 
 	platform_set_drvdata(pdev, ndev);
@@ -1455,13 +1589,16 @@ static int altera_tse_probe(struct platform_device *pdev)
 	ret = init_phy(ndev);
 	if (ret != 0) {
 		netdev_err(ndev, "Cannot attach to PHY (error: %d)\n", ret);
-		goto out_free_mdio;
+		goto err_init_phy;
 	}
 	return 0;
 
-out_free_mdio:
+err_init_phy:
+	unregister_netdev(ndev);
+err_register_netdev:
+	netif_napi_del(&priv->napi);
 	altera_tse_mdio_destroy(ndev);
-out_free:
+err_free_netdev:
 	free_netdev(ndev);
 	return ret;
 }
@@ -1471,6 +1608,14 @@ out_free:
 static int altera_tse_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
+	struct altera_tse_private *priv = netdev_priv(ndev);
+
+	if (ndev->phydev) {
+		phy_disconnect(ndev->phydev);
+
+		if (of_phy_is_fixed_link(priv->device->of_node))
+			of_phy_deregister_fixed_link(priv->device->of_node);
+	}
 
 	platform_set_drvdata(pdev, NULL);
 	altera_tse_mdio_destroy(ndev);
@@ -1480,7 +1625,7 @@ static int altera_tse_remove(struct platform_device *pdev)
 	return 0;
 }
 
-struct altera_dmaops altera_dtype_sgdma = {
+static const struct altera_dmaops altera_dtype_sgdma = {
 	.altera_dtype = ALTERA_DTYPE_SGDMA,
 	.dmamask = 32,
 	.reset_dma = sgdma_reset,
@@ -1496,9 +1641,10 @@ struct altera_dmaops altera_dtype_sgdma = {
 	.get_rx_status = sgdma_rx_status,
 	.init_dma = sgdma_initialize,
 	.uninit_dma = sgdma_uninitialize,
+	.start_rxdma = sgdma_start_rxdma,
 };
 
-struct altera_dmaops altera_dtype_msgdma = {
+static const struct altera_dmaops altera_dtype_msgdma = {
 	.altera_dtype = ALTERA_DTYPE_MSGDMA,
 	.dmamask = 64,
 	.reset_dma = msgdma_reset,
@@ -1514,9 +1660,10 @@ struct altera_dmaops altera_dtype_msgdma = {
 	.get_rx_status = msgdma_rx_status,
 	.init_dma = msgdma_initialize,
 	.uninit_dma = msgdma_uninitialize,
+	.start_rxdma = msgdma_start_rxdma,
 };
 
-static struct of_device_id altera_tse_ids[] = {
+static const struct of_device_id altera_tse_ids[] = {
 	{ .compatible = "altr,tse-msgdma-1.0", .data = &altera_dtype_msgdma, },
 	{ .compatible = "altr,tse-1.0", .data = &altera_dtype_sgdma, },
 	{ .compatible = "ALTR,tse-1.0", .data = &altera_dtype_sgdma, },
@@ -1531,7 +1678,6 @@ static struct platform_driver altera_tse_driver = {
 	.resume		= NULL,
 	.driver		= {
 		.name	= ALTERA_TSE_RESOURCE_NAME,
-		.owner	= THIS_MODULE,
 		.of_match_table = altera_tse_ids,
 	},
 };

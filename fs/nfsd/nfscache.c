@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Request reply cache. This is currently a global cache, but this may
  * change in the future and be a per-client cache.
@@ -8,7 +9,9 @@
  * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
  */
 
+#include <linux/sunrpc/svc_xprt.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/sunrpc/addr.h>
 #include <linux/highmem.h>
 #include <linux/log2.h>
@@ -27,56 +30,17 @@
  */
 #define TARGET_BUCKET_SIZE	64
 
-static struct hlist_head *	cache_hash;
-static struct list_head 	lru_head;
-static struct kmem_cache	*drc_slab;
-
-/* max number of entries allowed in the cache */
-static unsigned int		max_drc_entries;
-
-/* number of significant bits in the hash value */
-static unsigned int		maskbits;
-
-/*
- * Stats and other tracking of on the duplicate reply cache. All of these and
- * the "rc" fields in nfsdstats are protected by the cache_lock
- */
-
-/* total number of entries */
-static unsigned int		num_drc_entries;
-
-/* cache misses due only to checksum comparison failures */
-static unsigned int		payload_misses;
-
-/* amount of memory (in bytes) currently consumed by the DRC */
-static unsigned int		drc_mem_usage;
-
-/* longest hash chain seen */
-static unsigned int		longest_chain;
-
-/* size of cache when we saw the longest hash chain */
-static unsigned int		longest_chain_cachesize;
+struct nfsd_drc_bucket {
+	struct rb_root rb_head;
+	struct list_head lru_head;
+	spinlock_t cache_lock;
+};
 
 static int	nfsd_cache_append(struct svc_rqst *rqstp, struct kvec *vec);
-static void	cache_cleaner_func(struct work_struct *unused);
 static unsigned long nfsd_reply_cache_count(struct shrinker *shrink,
 					    struct shrink_control *sc);
 static unsigned long nfsd_reply_cache_scan(struct shrinker *shrink,
 					   struct shrink_control *sc);
-
-static struct shrinker nfsd_reply_cache_shrinker = {
-	.scan_objects = nfsd_reply_cache_scan,
-	.count_objects = nfsd_reply_cache_count,
-	.seeks	= 1,
-};
-
-/*
- * locking for the reply cache:
- * A cache entry is "single use" if c_state == RC_INPROG
- * Otherwise, it when accessing _prev or _next, the lock must be held.
- */
-static DEFINE_SPINLOCK(cache_lock);
-static DECLARE_DELAYED_WORK(cache_cleaner, cache_cleaner_func);
 
 /*
  * Put a cap on the size of the DRC based on the amount of available
@@ -95,12 +59,15 @@ static DECLARE_DELAYED_WORK(cache_cleaner, cache_cleaner_func);
  * ...with a hard cap of 256k entries. In the worst case, each entry will be
  * ~1k, so the above numbers should give a rough max of the amount of memory
  * used in k.
+ *
+ * XXX: these limits are per-container, so memory used will increase
+ * linearly with number of containers.  Maybe that's OK.
  */
 static unsigned int
 nfsd_cache_size_limit(void)
 {
 	unsigned int limit;
-	unsigned long low_pages = totalram_pages - totalhigh_pages;
+	unsigned long low_pages = totalram_pages() - totalhigh_pages();
 
 	limit = (16 * int_sqrt(low_pages)) << (PAGE_SHIFT-10);
 	return min_t(unsigned int, limit, 256*1024);
@@ -116,90 +83,134 @@ nfsd_hashsize(unsigned int limit)
 	return roundup_pow_of_two(limit / TARGET_BUCKET_SIZE);
 }
 
+static u32
+nfsd_cache_hash(__be32 xid, struct nfsd_net *nn)
+{
+	return hash_32(be32_to_cpu(xid), nn->maskbits);
+}
+
 static struct svc_cacherep *
-nfsd_reply_cache_alloc(void)
+nfsd_reply_cache_alloc(struct svc_rqst *rqstp, __wsum csum,
+			struct nfsd_net *nn)
 {
 	struct svc_cacherep	*rp;
 
-	rp = kmem_cache_alloc(drc_slab, GFP_KERNEL);
+	rp = kmem_cache_alloc(nn->drc_slab, GFP_KERNEL);
 	if (rp) {
 		rp->c_state = RC_UNUSED;
 		rp->c_type = RC_NOCACHE;
+		RB_CLEAR_NODE(&rp->c_node);
 		INIT_LIST_HEAD(&rp->c_lru);
-		INIT_HLIST_NODE(&rp->c_hash);
+
+		memset(&rp->c_key, 0, sizeof(rp->c_key));
+		rp->c_key.k_xid = rqstp->rq_xid;
+		rp->c_key.k_proc = rqstp->rq_proc;
+		rpc_copy_addr((struct sockaddr *)&rp->c_key.k_addr, svc_addr(rqstp));
+		rpc_set_port((struct sockaddr *)&rp->c_key.k_addr, rpc_get_port(svc_addr(rqstp)));
+		rp->c_key.k_prot = rqstp->rq_prot;
+		rp->c_key.k_vers = rqstp->rq_vers;
+		rp->c_key.k_len = rqstp->rq_arg.len;
+		rp->c_key.k_csum = csum;
 	}
 	return rp;
 }
 
 static void
-nfsd_reply_cache_free_locked(struct svc_cacherep *rp)
+nfsd_reply_cache_free_locked(struct nfsd_drc_bucket *b, struct svc_cacherep *rp,
+				struct nfsd_net *nn)
 {
 	if (rp->c_type == RC_REPLBUFF && rp->c_replvec.iov_base) {
-		drc_mem_usage -= rp->c_replvec.iov_len;
+		nn->drc_mem_usage -= rp->c_replvec.iov_len;
 		kfree(rp->c_replvec.iov_base);
 	}
-	if (!hlist_unhashed(&rp->c_hash))
-		hlist_del(&rp->c_hash);
-	list_del(&rp->c_lru);
-	--num_drc_entries;
-	drc_mem_usage -= sizeof(*rp);
-	kmem_cache_free(drc_slab, rp);
+	if (rp->c_state != RC_UNUSED) {
+		rb_erase(&rp->c_node, &b->rb_head);
+		list_del(&rp->c_lru);
+		atomic_dec(&nn->num_drc_entries);
+		nn->drc_mem_usage -= sizeof(*rp);
+	}
+	kmem_cache_free(nn->drc_slab, rp);
 }
 
 static void
-nfsd_reply_cache_free(struct svc_cacherep *rp)
+nfsd_reply_cache_free(struct nfsd_drc_bucket *b, struct svc_cacherep *rp,
+			struct nfsd_net *nn)
 {
-	spin_lock(&cache_lock);
-	nfsd_reply_cache_free_locked(rp);
-	spin_unlock(&cache_lock);
+	spin_lock(&b->cache_lock);
+	nfsd_reply_cache_free_locked(b, rp, nn);
+	spin_unlock(&b->cache_lock);
 }
 
-int nfsd_reply_cache_init(void)
+int nfsd_reply_cache_init(struct nfsd_net *nn)
 {
 	unsigned int hashsize;
+	unsigned int i;
+	int status = 0;
 
-	INIT_LIST_HEAD(&lru_head);
-	max_drc_entries = nfsd_cache_size_limit();
-	num_drc_entries = 0;
-	hashsize = nfsd_hashsize(max_drc_entries);
-	maskbits = ilog2(hashsize);
+	nn->max_drc_entries = nfsd_cache_size_limit();
+	atomic_set(&nn->num_drc_entries, 0);
+	hashsize = nfsd_hashsize(nn->max_drc_entries);
+	nn->maskbits = ilog2(hashsize);
 
-	register_shrinker(&nfsd_reply_cache_shrinker);
-	drc_slab = kmem_cache_create("nfsd_drc", sizeof(struct svc_cacherep),
-					0, 0, NULL);
-	if (!drc_slab)
+	nn->nfsd_reply_cache_shrinker.scan_objects = nfsd_reply_cache_scan;
+	nn->nfsd_reply_cache_shrinker.count_objects = nfsd_reply_cache_count;
+	nn->nfsd_reply_cache_shrinker.seeks = 1;
+	status = register_shrinker(&nn->nfsd_reply_cache_shrinker);
+	if (status)
 		goto out_nomem;
 
-	cache_hash = kcalloc(hashsize, sizeof(struct hlist_head), GFP_KERNEL);
-	if (!cache_hash)
-		goto out_nomem;
+	nn->drc_slab = kmem_cache_create("nfsd_drc",
+				sizeof(struct svc_cacherep), 0, 0, NULL);
+	if (!nn->drc_slab)
+		goto out_shrinker;
+
+	nn->drc_hashtbl = kcalloc(hashsize,
+				sizeof(*nn->drc_hashtbl), GFP_KERNEL);
+	if (!nn->drc_hashtbl) {
+		nn->drc_hashtbl = vzalloc(array_size(hashsize,
+						 sizeof(*nn->drc_hashtbl)));
+		if (!nn->drc_hashtbl)
+			goto out_slab;
+	}
+
+	for (i = 0; i < hashsize; i++) {
+		INIT_LIST_HEAD(&nn->drc_hashtbl[i].lru_head);
+		spin_lock_init(&nn->drc_hashtbl[i].cache_lock);
+	}
+	nn->drc_hashsize = hashsize;
 
 	return 0;
+out_slab:
+	kmem_cache_destroy(nn->drc_slab);
+out_shrinker:
+	unregister_shrinker(&nn->nfsd_reply_cache_shrinker);
 out_nomem:
 	printk(KERN_ERR "nfsd: failed to allocate reply cache\n");
-	nfsd_reply_cache_shutdown();
 	return -ENOMEM;
 }
 
-void nfsd_reply_cache_shutdown(void)
+void nfsd_reply_cache_shutdown(struct nfsd_net *nn)
 {
 	struct svc_cacherep	*rp;
+	unsigned int i;
 
-	unregister_shrinker(&nfsd_reply_cache_shrinker);
-	cancel_delayed_work_sync(&cache_cleaner);
+	unregister_shrinker(&nn->nfsd_reply_cache_shrinker);
 
-	while (!list_empty(&lru_head)) {
-		rp = list_entry(lru_head.next, struct svc_cacherep, c_lru);
-		nfsd_reply_cache_free_locked(rp);
+	for (i = 0; i < nn->drc_hashsize; i++) {
+		struct list_head *head = &nn->drc_hashtbl[i].lru_head;
+		while (!list_empty(head)) {
+			rp = list_first_entry(head, struct svc_cacherep, c_lru);
+			nfsd_reply_cache_free_locked(&nn->drc_hashtbl[i],
+									rp, nn);
+		}
 	}
 
-	kfree (cache_hash);
-	cache_hash = NULL;
+	kvfree(nn->drc_hashtbl);
+	nn->drc_hashtbl = NULL;
+	nn->drc_hashsize = 0;
 
-	if (drc_slab) {
-		kmem_cache_destroy(drc_slab);
-		drc_slab = NULL;
-	}
+	kmem_cache_destroy(nn->drc_slab);
+	nn->drc_slab = NULL;
 }
 
 /*
@@ -207,28 +218,32 @@ void nfsd_reply_cache_shutdown(void)
  * not already scheduled.
  */
 static void
-lru_put_end(struct svc_cacherep *rp)
+lru_put_end(struct nfsd_drc_bucket *b, struct svc_cacherep *rp)
 {
 	rp->c_timestamp = jiffies;
-	list_move_tail(&rp->c_lru, &lru_head);
-	schedule_delayed_work(&cache_cleaner, RC_EXPIRE);
+	list_move_tail(&rp->c_lru, &b->lru_head);
 }
 
-/*
- * Move a cache entry from one hash list to another
- */
-static void
-hash_refile(struct svc_cacherep *rp)
+static long
+prune_bucket(struct nfsd_drc_bucket *b, struct nfsd_net *nn)
 {
-	hlist_del_init(&rp->c_hash);
-	hlist_add_head(&rp->c_hash, cache_hash + hash_32(rp->c_xid, maskbits));
-}
+	struct svc_cacherep *rp, *tmp;
+	long freed = 0;
 
-static inline bool
-nfsd_cache_entry_expired(struct svc_cacherep *rp)
-{
-	return rp->c_state != RC_INPROG &&
-	       time_after(jiffies, rp->c_timestamp + RC_EXPIRE);
+	list_for_each_entry_safe(rp, tmp, &b->lru_head, c_lru) {
+		/*
+		 * Don't free entries attached to calls that are still
+		 * in-progress, but do keep scanning the list.
+		 */
+		if (rp->c_state == RC_INPROG)
+			continue;
+		if (atomic_read(&nn->num_drc_entries) <= nn->max_drc_entries &&
+		    time_before(jiffies, rp->c_timestamp + RC_EXPIRE))
+			break;
+		nfsd_reply_cache_free_locked(b, rp, nn);
+		freed++;
+	}
+	return freed;
 }
 
 /*
@@ -236,61 +251,39 @@ nfsd_cache_entry_expired(struct svc_cacherep *rp)
  * Also prune the oldest ones when the total exceeds the max number of entries.
  */
 static long
-prune_cache_entries(void)
+prune_cache_entries(struct nfsd_net *nn)
 {
-	struct svc_cacherep *rp, *tmp;
+	unsigned int i;
 	long freed = 0;
 
-	list_for_each_entry_safe(rp, tmp, &lru_head, c_lru) {
-		if (!nfsd_cache_entry_expired(rp) &&
-		    num_drc_entries <= max_drc_entries)
-			break;
-		nfsd_reply_cache_free_locked(rp);
-		freed++;
+	for (i = 0; i < nn->drc_hashsize; i++) {
+		struct nfsd_drc_bucket *b = &nn->drc_hashtbl[i];
+
+		if (list_empty(&b->lru_head))
+			continue;
+		spin_lock(&b->cache_lock);
+		freed += prune_bucket(b, nn);
+		spin_unlock(&b->cache_lock);
 	}
-
-	/*
-	 * Conditionally rearm the job. If we cleaned out the list, then
-	 * cancel any pending run (since there won't be any work to do).
-	 * Otherwise, we rearm the job or modify the existing one to run in
-	 * RC_EXPIRE since we just ran the pruner.
-	 */
-	if (list_empty(&lru_head))
-		cancel_delayed_work(&cache_cleaner);
-	else
-		mod_delayed_work(system_wq, &cache_cleaner, RC_EXPIRE);
 	return freed;
-}
-
-static void
-cache_cleaner_func(struct work_struct *unused)
-{
-	spin_lock(&cache_lock);
-	prune_cache_entries();
-	spin_unlock(&cache_lock);
 }
 
 static unsigned long
 nfsd_reply_cache_count(struct shrinker *shrink, struct shrink_control *sc)
 {
-	unsigned long num;
+	struct nfsd_net *nn = container_of(shrink,
+				struct nfsd_net, nfsd_reply_cache_shrinker);
 
-	spin_lock(&cache_lock);
-	num = num_drc_entries;
-	spin_unlock(&cache_lock);
-
-	return num;
+	return atomic_read(&nn->num_drc_entries);
 }
 
 static unsigned long
 nfsd_reply_cache_scan(struct shrinker *shrink, struct shrink_control *sc)
 {
-	unsigned long freed;
+	struct nfsd_net *nn = container_of(shrink,
+				struct nfsd_net, nfsd_reply_cache_shrinker);
 
-	spin_lock(&cache_lock);
-	freed = prune_cache_entries();
-	spin_unlock(&cache_lock);
-	return freed;
+	return prune_cache_entries(nn);
 }
 /*
  * Walk an xdr_buf and get a CRC for at most the first RC_CSUMLEN bytes
@@ -325,57 +318,62 @@ nfsd_cache_csum(struct svc_rqst *rqstp)
 	return csum;
 }
 
-static bool
-nfsd_cache_match(struct svc_rqst *rqstp, __wsum csum, struct svc_cacherep *rp)
+static int
+nfsd_cache_key_cmp(const struct svc_cacherep *key,
+			const struct svc_cacherep *rp, struct nfsd_net *nn)
 {
-	/* Check RPC header info first */
-	if (rqstp->rq_xid != rp->c_xid || rqstp->rq_proc != rp->c_proc ||
-	    rqstp->rq_prot != rp->c_prot || rqstp->rq_vers != rp->c_vers ||
-	    rqstp->rq_arg.len != rp->c_len ||
-	    !rpc_cmp_addr(svc_addr(rqstp), (struct sockaddr *)&rp->c_addr) ||
-	    rpc_get_port(svc_addr(rqstp)) != rpc_get_port((struct sockaddr *)&rp->c_addr))
-		return false;
+	if (key->c_key.k_xid == rp->c_key.k_xid &&
+	    key->c_key.k_csum != rp->c_key.k_csum)
+		++nn->payload_misses;
 
-	/* compare checksum of NFS data */
-	if (csum != rp->c_csum) {
-		++payload_misses;
-		return false;
-	}
-
-	return true;
+	return memcmp(&key->c_key, &rp->c_key, sizeof(key->c_key));
 }
 
 /*
  * Search the request hash for an entry that matches the given rqstp.
  * Must be called with cache_lock held. Returns the found entry or
- * NULL on failure.
+ * inserts an empty key on failure.
  */
 static struct svc_cacherep *
-nfsd_cache_search(struct svc_rqst *rqstp, __wsum csum)
+nfsd_cache_insert(struct nfsd_drc_bucket *b, struct svc_cacherep *key,
+			struct nfsd_net *nn)
 {
-	struct svc_cacherep	*rp, *ret = NULL;
-	struct hlist_head 	*rh;
+	struct svc_cacherep	*rp, *ret = key;
+	struct rb_node		**p = &b->rb_head.rb_node,
+				*parent = NULL;
 	unsigned int		entries = 0;
+	int cmp;
 
-	rh = &cache_hash[hash_32(rqstp->rq_xid, maskbits)];
-	hlist_for_each_entry(rp, rh, c_hash) {
+	while (*p != NULL) {
 		++entries;
-		if (nfsd_cache_match(rqstp, csum, rp)) {
+		parent = *p;
+		rp = rb_entry(parent, struct svc_cacherep, c_node);
+
+		cmp = nfsd_cache_key_cmp(key, rp, nn);
+		if (cmp < 0)
+			p = &parent->rb_left;
+		else if (cmp > 0)
+			p = &parent->rb_right;
+		else {
 			ret = rp;
-			break;
+			goto out;
 		}
 	}
-
+	rb_link_node(&key->c_node, parent, p);
+	rb_insert_color(&key->c_node, &b->rb_head);
+out:
 	/* tally hash chain length stats */
-	if (entries > longest_chain) {
-		longest_chain = entries;
-		longest_chain_cachesize = num_drc_entries;
-	} else if (entries == longest_chain) {
+	if (entries > nn->longest_chain) {
+		nn->longest_chain = entries;
+		nn->longest_chain_cachesize = atomic_read(&nn->num_drc_entries);
+	} else if (entries == nn->longest_chain) {
 		/* prefer to keep the smallest cachesize possible here */
-		longest_chain_cachesize = min(longest_chain_cachesize,
-						num_drc_entries);
+		nn->longest_chain_cachesize = min_t(unsigned int,
+				nn->longest_chain_cachesize,
+				atomic_read(&nn->num_drc_entries));
 	}
 
+	lru_put_end(b, ret);
 	return ret;
 }
 
@@ -389,13 +387,12 @@ nfsd_cache_search(struct svc_rqst *rqstp, __wsum csum)
 int
 nfsd_cache_lookup(struct svc_rqst *rqstp)
 {
+	struct nfsd_net *nn = net_generic(SVC_NET(rqstp), nfsd_net_id);
 	struct svc_cacherep	*rp, *found;
 	__be32			xid = rqstp->rq_xid;
-	u32			proto =  rqstp->rq_prot,
-				vers = rqstp->rq_vers,
-				proc = rqstp->rq_proc;
 	__wsum			csum;
-	unsigned long		age;
+	u32 hash = nfsd_cache_hash(xid, nn);
+	struct nfsd_drc_bucket *b = &nn->drc_hashtbl[hash];
 	int type = rqstp->rq_cachetype;
 	int rtn = RC_DOIT;
 
@@ -411,70 +408,46 @@ nfsd_cache_lookup(struct svc_rqst *rqstp)
 	 * Since the common case is a cache miss followed by an insert,
 	 * preallocate an entry.
 	 */
-	rp = nfsd_reply_cache_alloc();
-	spin_lock(&cache_lock);
-	if (likely(rp)) {
-		++num_drc_entries;
-		drc_mem_usage += sizeof(*rp);
-	}
-
-	/* go ahead and prune the cache */
-	prune_cache_entries();
-
-	found = nfsd_cache_search(rqstp, csum);
-	if (found) {
-		if (likely(rp))
-			nfsd_reply_cache_free_locked(rp);
-		rp = found;
-		goto found_entry;
-	}
-
+	rp = nfsd_reply_cache_alloc(rqstp, csum, nn);
 	if (!rp) {
 		dprintk("nfsd: unable to allocate DRC entry!\n");
-		goto out;
+		return rtn;
+	}
+
+	spin_lock(&b->cache_lock);
+	found = nfsd_cache_insert(b, rp, nn);
+	if (found != rp) {
+		nfsd_reply_cache_free_locked(NULL, rp, nn);
+		rp = found;
+		goto found_entry;
 	}
 
 	nfsdstats.rcmisses++;
 	rqstp->rq_cacherep = rp;
 	rp->c_state = RC_INPROG;
-	rp->c_xid = xid;
-	rp->c_proc = proc;
-	rpc_copy_addr((struct sockaddr *)&rp->c_addr, svc_addr(rqstp));
-	rpc_set_port((struct sockaddr *)&rp->c_addr, rpc_get_port(svc_addr(rqstp)));
-	rp->c_prot = proto;
-	rp->c_vers = vers;
-	rp->c_len = rqstp->rq_arg.len;
-	rp->c_csum = csum;
 
-	hash_refile(rp);
-	lru_put_end(rp);
+	atomic_inc(&nn->num_drc_entries);
+	nn->drc_mem_usage += sizeof(*rp);
 
-	/* release any buffer */
-	if (rp->c_type == RC_REPLBUFF) {
-		drc_mem_usage -= rp->c_replvec.iov_len;
-		kfree(rp->c_replvec.iov_base);
-		rp->c_replvec.iov_base = NULL;
-	}
-	rp->c_type = RC_NOCACHE;
+	/* go ahead and prune the cache */
+	prune_bucket(b, nn);
  out:
-	spin_unlock(&cache_lock);
+	spin_unlock(&b->cache_lock);
 	return rtn;
 
 found_entry:
-	nfsdstats.rchits++;
 	/* We found a matching entry which is either in progress or done. */
-	age = jiffies - rp->c_timestamp;
-	lru_put_end(rp);
-
+	nfsdstats.rchits++;
 	rtn = RC_DROPIT;
-	/* Request being processed or excessive rexmits */
-	if (rp->c_state == RC_INPROG || age < RC_DELAY)
+
+	/* Request being processed */
+	if (rp->c_state == RC_INPROG)
 		goto out;
 
 	/* From the hall of fame of impractical attacks:
 	 * Is this a user who tries to snoop on the cache? */
 	rtn = RC_DOIT;
-	if (!rqstp->rq_secure && rp->c_secure)
+	if (!test_bit(RQ_SECURE, &rqstp->rq_flags) && rp->c_secure)
 		goto out;
 
 	/* Compose RPC reply header */
@@ -492,7 +465,7 @@ found_entry:
 		break;
 	default:
 		printk(KERN_WARNING "nfsd: bad repcache type %d\n", rp->c_type);
-		nfsd_reply_cache_free_locked(rp);
+		nfsd_reply_cache_free_locked(b, rp, nn);
 	}
 
 	goto out;
@@ -517,20 +490,26 @@ found_entry:
 void
 nfsd_cache_update(struct svc_rqst *rqstp, int cachetype, __be32 *statp)
 {
+	struct nfsd_net *nn = net_generic(SVC_NET(rqstp), nfsd_net_id);
 	struct svc_cacherep *rp = rqstp->rq_cacherep;
 	struct kvec	*resv = &rqstp->rq_res.head[0], *cachv;
+	u32		hash;
+	struct nfsd_drc_bucket *b;
 	int		len;
 	size_t		bufsize = 0;
 
 	if (!rp)
 		return;
 
+	hash = nfsd_cache_hash(rp->c_key.k_xid, nn);
+	b = &nn->drc_hashtbl[hash];
+
 	len = resv->iov_len - ((char*)statp - (char*)resv->iov_base);
 	len >>= 2;
 
 	/* Don't cache excessive amounts of data and XDR failures */
 	if (!statp || len > (256 >> 2)) {
-		nfsd_reply_cache_free(rp);
+		nfsd_reply_cache_free(b, rp, nn);
 		return;
 	}
 
@@ -545,23 +524,23 @@ nfsd_cache_update(struct svc_rqst *rqstp, int cachetype, __be32 *statp)
 		bufsize = len << 2;
 		cachv->iov_base = kmalloc(bufsize, GFP_KERNEL);
 		if (!cachv->iov_base) {
-			nfsd_reply_cache_free(rp);
+			nfsd_reply_cache_free(b, rp, nn);
 			return;
 		}
 		cachv->iov_len = bufsize;
 		memcpy(cachv->iov_base, statp, bufsize);
 		break;
 	case RC_NOCACHE:
-		nfsd_reply_cache_free(rp);
+		nfsd_reply_cache_free(b, rp, nn);
 		return;
 	}
-	spin_lock(&cache_lock);
-	drc_mem_usage += bufsize;
-	lru_put_end(rp);
-	rp->c_secure = rqstp->rq_secure;
+	spin_lock(&b->cache_lock);
+	nn->drc_mem_usage += bufsize;
+	lru_put_end(b, rp);
+	rp->c_secure = test_bit(RQ_SECURE, &rqstp->rq_flags);
 	rp->c_type = cachetype;
 	rp->c_state = RC_DONE;
-	spin_unlock(&cache_lock);
+	spin_unlock(&b->cache_lock);
 	return;
 }
 
@@ -576,7 +555,7 @@ nfsd_cache_append(struct svc_rqst *rqstp, struct kvec *data)
 	struct kvec	*vec = &rqstp->rq_res.head[0];
 
 	if (vec->iov_len + data->iov_len > PAGE_SIZE) {
-		printk(KERN_WARNING "nfsd: cached reply too large (%Zd).\n",
+		printk(KERN_WARNING "nfsd: cached reply too large (%zd).\n",
 				data->iov_len);
 		return 0;
 	}
@@ -592,22 +571,26 @@ nfsd_cache_append(struct svc_rqst *rqstp, struct kvec *data)
  */
 static int nfsd_reply_cache_stats_show(struct seq_file *m, void *v)
 {
-	spin_lock(&cache_lock);
-	seq_printf(m, "max entries:           %u\n", max_drc_entries);
-	seq_printf(m, "num entries:           %u\n", num_drc_entries);
-	seq_printf(m, "hash buckets:          %u\n", 1 << maskbits);
-	seq_printf(m, "mem usage:             %u\n", drc_mem_usage);
+	struct nfsd_net *nn = m->private;
+
+	seq_printf(m, "max entries:           %u\n", nn->max_drc_entries);
+	seq_printf(m, "num entries:           %u\n",
+			atomic_read(&nn->num_drc_entries));
+	seq_printf(m, "hash buckets:          %u\n", 1 << nn->maskbits);
+	seq_printf(m, "mem usage:             %u\n", nn->drc_mem_usage);
 	seq_printf(m, "cache hits:            %u\n", nfsdstats.rchits);
 	seq_printf(m, "cache misses:          %u\n", nfsdstats.rcmisses);
 	seq_printf(m, "not cached:            %u\n", nfsdstats.rcnocache);
-	seq_printf(m, "payload misses:        %u\n", payload_misses);
-	seq_printf(m, "longest chain len:     %u\n", longest_chain);
-	seq_printf(m, "cachesize at longest:  %u\n", longest_chain_cachesize);
-	spin_unlock(&cache_lock);
+	seq_printf(m, "payload misses:        %u\n", nn->payload_misses);
+	seq_printf(m, "longest chain len:     %u\n", nn->longest_chain);
+	seq_printf(m, "cachesize at longest:  %u\n", nn->longest_chain_cachesize);
 	return 0;
 }
 
 int nfsd_reply_cache_stats_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, nfsd_reply_cache_stats_show, NULL);
+	struct nfsd_net *nn = net_generic(file_inode(file)->i_sb->s_fs_info,
+								nfsd_net_id);
+
+	return single_open(file, nfsd_reply_cache_stats_show, nn);
 }

@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  * Backlight driver for HP Jornada 700 series (710/720/728)
  * Copyright (C) 2006-2009 Kristoffer Ericson <kristoffer.ericson@gmail.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 or any later version as published by the Free Software Foundation.
- *
  */
 
 #include <linux/backlight.h>
@@ -41,10 +37,10 @@ static int jornada_bl_get_brightness(struct backlight_device *bd)
 		dev_err(&bd->dev, "get brightness timeout\n");
 		jornada_ssp_end();
 		return -ETIMEDOUT;
-	} else {
-		/* exchange txdummy for value */
-		ret = jornada_ssp_byte(TXDUMMY);
 	}
+
+	/* exchange txdummy for value */
+	ret = jornada_ssp_byte(TXDUMMY);
 
 	jornada_ssp_end();
 

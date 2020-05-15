@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Sanyo LV5207LP LED Driver
  *
  * Copyright (C) 2013 Ideas on board SPRL
  *
  * Contact: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/backlight.h>
@@ -70,11 +67,6 @@ static int lv5207lp_backlight_update_status(struct backlight_device *backlight)
 	return 0;
 }
 
-static int lv5207lp_backlight_get_brightness(struct backlight_device *backlight)
-{
-	return backlight->props.brightness;
-}
-
 static int lv5207lp_backlight_check_fb(struct backlight_device *backlight,
 				       struct fb_info *info)
 {
@@ -86,7 +78,6 @@ static int lv5207lp_backlight_check_fb(struct backlight_device *backlight,
 static const struct backlight_ops lv5207lp_backlight_ops = {
 	.options	= BL_CORE_SUSPENDRESUME,
 	.update_status	= lv5207lp_backlight_update_status,
-	.get_brightness	= lv5207lp_backlight_get_brightness,
 	.check_fb	= lv5207lp_backlight_check_fb,
 };
 

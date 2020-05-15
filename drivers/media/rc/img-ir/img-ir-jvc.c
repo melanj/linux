@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ImgTec IR Decoder setup for JVC protocol.
  *
@@ -7,7 +8,8 @@
 #include "img-ir-hw.h"
 
 /* Convert JVC data to a scancode */
-static int img_ir_jvc_scancode(int len, u64 raw, int *scancode, u64 protocols)
+static int img_ir_jvc_scancode(int len, u64 raw, u64 enabled_protocols,
+			       struct img_ir_scancode_req *request)
 {
 	unsigned int cust, data;
 
@@ -17,7 +19,8 @@ static int img_ir_jvc_scancode(int len, u64 raw, int *scancode, u64 protocols)
 	cust = (raw >> 0) & 0xff;
 	data = (raw >> 8) & 0xff;
 
-	*scancode = cust << 8 | data;
+	request->protocol = RC_PROTO_JVC;
+	request->scancode = cust << 8 | data;
 	return IMG_IR_SCANCODE;
 }
 
@@ -45,7 +48,7 @@ static int img_ir_jvc_filter(const struct rc_scancode_filter *in,
  *          http://support.jvc.com/consumer/support/documents/RemoteCodes.pdf
  */
 struct img_ir_decoder img_ir_jvc = {
-	.type = RC_BIT_JVC,
+	.type = RC_PROTO_BIT_JVC,
 	.control = {
 		.decoden = 1,
 		.code_type = IMG_IR_CODETYPE_PULSEDIST,

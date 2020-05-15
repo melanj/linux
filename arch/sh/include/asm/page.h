@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_PAGE_H
 #define __ASM_SH_PAGE_H
 
@@ -59,6 +60,7 @@ pages_do_alias(unsigned long addr1, unsigned long addr2)
 
 #define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
 extern void copy_page(void *to, void *from);
+#define copy_user_page(to, from, vaddr, pg)  __copy_user(to, from, PAGE_SIZE)
 
 struct page;
 struct vm_area_struct;
@@ -180,16 +182,8 @@ typedef struct page *pgtable_t;
 #endif
 #define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
-
 #include <asm-generic/memory_model.h>
 #include <asm-generic/getorder.h>
-
-/* vDSO support */
-#ifdef CONFIG_VSYSCALL
-#define __HAVE_ARCH_GATE_AREA
-#endif
 
 /*
  * Some drivers need to perform DMA into kmalloc'ed buffers

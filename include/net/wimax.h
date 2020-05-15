@@ -1,25 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Linux WiMAX
  * Kernel space API for accessing WiMAX devices
  *
- *
  * Copyright (C) 2007-2008 Intel Corporation <linux-wimax@intel.com>
  * Inaky Perez-Gonzalez <inaky.perez-gonzalez@intel.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA.
- *
  *
  * The WiMAX stack provides an API for controlling and managing the
  * system's WiMAX devices. This API affects the control plane; the
@@ -290,7 +275,7 @@ struct wimax_dev;
  *     This operation has to be synchronous, and return only when the
  *     reset is complete. In case of having had to resort to bus/cold
  *     reset implying a device disconnection, the call is allowed to
- *     return inmediately.
+ *     return immediately.
  *     NOTE: wimax_dev->mutex is NOT locked when this op is being
  *     called; however, wimax_dev->mutex_reset IS locked to ensure
  *     serialization of calls to wimax_reset().
@@ -483,8 +468,8 @@ void wimax_report_rfkill_sw(struct wimax_dev *, enum wimax_rf_state);
  * Be sure not to modify skb->data in the middle (ie: don't use
  * skb_push()/skb_pull()/skb_reserve() on the skb).
  *
- * "pipe_name" is any string, than can be interpreted as the name of
- * the pipe or destinatary; the interpretation of it is driver
+ * "pipe_name" is any string, that can be interpreted as the name of
+ * the pipe or recipient; the interpretation of it is driver
  * specific, so the recipient can multiplex it as wished. It can be
  * NULL, it won't be used - an example is using a "diagnostics" tag to
  * send diagnostics information that a device-specific diagnostics

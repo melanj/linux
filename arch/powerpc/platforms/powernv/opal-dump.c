@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PowerNV OPAL Dump Interface
  *
  * Copyright 2013,2014 IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kobject.h>
@@ -15,6 +11,7 @@
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 
 #include <asm/opal.h>
 
@@ -60,7 +57,7 @@ static ssize_t dump_type_show(struct dump_obj *dump_obj,
 			      struct dump_attribute *attr,
 			      char *buf)
 {
-	
+
 	return sprintf(buf, "0x%x %s\n", dump_obj->type,
 		       dump_type_to_string(dump_obj->type));
 }
@@ -102,9 +99,9 @@ static ssize_t dump_ack_store(struct dump_obj *dump_obj,
  * due to the dynamic size of the dump
  */
 static struct dump_attribute id_attribute =
-	__ATTR(id, 0666, dump_id_show, NULL);
+	__ATTR(id, 0444, dump_id_show, NULL);
 static struct dump_attribute type_attribute =
-	__ATTR(type, 0666, dump_type_show, NULL);
+	__ATTR(type, 0444, dump_type_show, NULL);
 static struct dump_attribute ack_attribute =
 	__ATTR(acknowledge, 0660, dump_ack_show, dump_ack_store);
 
@@ -112,7 +109,7 @@ static ssize_t init_dump_show(struct dump_obj *dump_obj,
 			      struct dump_attribute *attr,
 			      char *buf)
 {
-	return sprintf(buf, "1 - initiate dump\n");
+	return sprintf(buf, "1 - initiate Service Processor(FSP) dump\n");
 }
 
 static int64_t dump_fips_init(uint8_t type)
@@ -121,7 +118,7 @@ static int64_t dump_fips_init(uint8_t type)
 
 	rc = opal_dump_init(type);
 	if (rc)
-		pr_warn("%s: Failed to initiate FipS dump (%d)\n",
+		pr_warn("%s: Failed to initiate FSP dump (%d)\n",
 			__func__, rc);
 	return rc;
 }
@@ -131,8 +128,12 @@ static ssize_t init_dump_store(struct dump_obj *dump_obj,
 			       const char *buf,
 			       size_t count)
 {
-	dump_fips_init(DUMP_TYPE_FSP);
-	pr_info("%s: Initiated FSP dump\n", __func__);
+	int rc;
+
+	rc = dump_fips_init(DUMP_TYPE_FSP);
+	if (rc == OPAL_SUCCESS)
+		pr_info("%s: Initiated FSP dump\n", __func__);
+
 	return count;
 }
 
@@ -209,93 +210,27 @@ static struct kobj_type dump_ktype = {
 	.default_attrs = dump_default_attrs,
 };
 
-static void free_dump_sg_list(struct opal_sg_list *list)
+static int64_t dump_read_info(uint32_t *dump_id, uint32_t *dump_size, uint32_t *dump_type)
 {
-	struct opal_sg_list *sg1;
-	while (list) {
-		sg1 = list->next;
-		kfree(list);
-		list = sg1;
-	}
-	list = NULL;
-}
-
-static struct opal_sg_list *dump_data_to_sglist(struct dump_obj *dump)
-{
-	struct opal_sg_list *sg1, *list = NULL;
-	void *addr;
-	int64_t size;
-
-	addr = dump->buffer;
-	size = dump->size;
-
-	sg1 = kzalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!sg1)
-		goto nomem;
-
-	list = sg1;
-	sg1->num_entries = 0;
-	while (size > 0) {
-		/* Translate virtual address to physical address */
-		sg1->entry[sg1->num_entries].data =
-			(void *)(vmalloc_to_pfn(addr) << PAGE_SHIFT);
-
-		if (size > PAGE_SIZE)
-			sg1->entry[sg1->num_entries].length = PAGE_SIZE;
-		else
-			sg1->entry[sg1->num_entries].length = size;
-
-		sg1->num_entries++;
-		if (sg1->num_entries >= SG_ENTRIES_PER_NODE) {
-			sg1->next = kzalloc(PAGE_SIZE, GFP_KERNEL);
-			if (!sg1->next)
-				goto nomem;
-
-			sg1 = sg1->next;
-			sg1->num_entries = 0;
-		}
-		addr += PAGE_SIZE;
-		size -= PAGE_SIZE;
-	}
-	return list;
-
-nomem:
-	pr_err("%s : Failed to allocate memory\n", __func__);
-	free_dump_sg_list(list);
-	return NULL;
-}
-
-static void sglist_to_phy_addr(struct opal_sg_list *list)
-{
-	struct opal_sg_list *sg, *next;
-
-	for (sg = list; sg; sg = next) {
-		next = sg->next;
-		/* Don't translate NULL pointer for last entry */
-		if (sg->next)
-			sg->next = (struct opal_sg_list *)__pa(sg->next);
-		else
-			sg->next = NULL;
-
-		/* Convert num_entries to length */
-		sg->num_entries =
-			sg->num_entries * sizeof(struct opal_sg_entry) + 16;
-	}
-}
-
-static int64_t dump_read_info(uint32_t *id, uint32_t *size, uint32_t *type)
-{
+	__be32 id, size, type;
 	int rc;
-	*type = 0xffffffff;
 
-	rc = opal_dump_info2(id, size, type);
+	type = cpu_to_be32(0xffffffff);
 
+	rc = opal_dump_info2(&id, &size, &type);
 	if (rc == OPAL_PARAMETER)
-		rc = opal_dump_info(id, size);
+		rc = opal_dump_info(&id, &size);
 
-	if (rc)
+	if (rc) {
 		pr_warn("%s: Failed to get dump info (%d)\n",
 			__func__, rc);
+		return rc;
+	}
+
+	*dump_id = be32_to_cpu(id);
+	*dump_size = be32_to_cpu(size);
+	*dump_type = be32_to_cpu(type);
+
 	return rc;
 }
 
@@ -314,14 +249,11 @@ static int64_t dump_read_data(struct dump_obj *dump)
 	}
 
 	/* Generate SG list */
-	list = dump_data_to_sglist(dump);
+	list = opal_vmalloc_to_sg_list(dump->buffer, dump->size);
 	if (!list) {
 		rc = -ENOMEM;
 		goto out;
 	}
-
-	/* Translate sg list addr to real address */
-	sglist_to_phy_addr(list);
 
 	/* First entry address */
 	addr = __pa(list);
@@ -341,7 +273,7 @@ static int64_t dump_read_data(struct dump_obj *dump)
 			__func__, dump->id);
 
 	/* Free SG list */
-	free_dump_sg_list(list);
+	opal_free_sg_list(list);
 
 out:
 	return rc;
@@ -369,7 +301,7 @@ static ssize_t dump_attr_read(struct file *filep, struct kobject *kobj,
 			 * and rely on userspace to ask us to try
 			 * again.
 			 */
-			pr_info("%s: Platform dump partially read.ID = 0x%x\n",
+			pr_info("%s: Platform dump partially read. ID = 0x%x\n",
 				__func__, dump->id);
 			return -EIO;
 		}
@@ -431,16 +363,16 @@ static struct dump_obj *create_dump_obj(uint32_t id, size_t size,
 	return dump;
 }
 
-static int process_dump(void)
+static irqreturn_t process_dump(int irq, void *data)
 {
 	int rc;
 	uint32_t dump_id, dump_size, dump_type;
-	struct dump_obj *dump;
 	char name[22];
+	struct kobject *kobj;
 
 	rc = dump_read_info(&dump_id, &dump_size, &dump_type);
 	if (rc != OPAL_SUCCESS)
-		return rc;
+		return IRQ_HANDLED;
 
 	sprintf(name, "0x%x-0x%x", dump_type, dump_id);
 
@@ -448,52 +380,26 @@ static int process_dump(void)
 	 * that gracefully and not create two conflicting
 	 * entries.
 	 */
-	if (kset_find_obj(dump_kset, name))
-		return 0;
+	kobj = kset_find_obj(dump_kset, name);
+	if (kobj) {
+		/* Drop reference added by kset_find_obj() */
+		kobject_put(kobj);
+		return IRQ_HANDLED;
+	}
 
-	dump = create_dump_obj(dump_id, dump_size, dump_type);
-	if (!dump)
-		return -1;
+	create_dump_obj(dump_id, dump_size, dump_type);
 
-	return 0;
+	return IRQ_HANDLED;
 }
-
-static void dump_work_fn(struct work_struct *work)
-{
-	process_dump();
-}
-
-static DECLARE_WORK(dump_work, dump_work_fn);
-
-static void schedule_process_dump(void)
-{
-	schedule_work(&dump_work);
-}
-
-/*
- * New dump available notification
- *
- * Once we get notification, we add sysfs entries for it.
- * We only fetch the dump on demand, and create sysfs asynchronously.
- */
-static int dump_event(struct notifier_block *nb,
-		      unsigned long events, void *change)
-{
-	if (events & OPAL_EVENT_DUMP_AVAIL)
-		schedule_process_dump();
-
-	return 0;
-}
-
-static struct notifier_block dump_nb = {
-	.notifier_call  = dump_event,
-	.next           = NULL,
-	.priority       = 0
-};
 
 void __init opal_platform_dump_init(void)
 {
 	int rc;
+	int dump_irq;
+
+	/* ELOG not supported by firmware */
+	if (!opal_check_token(OPAL_DUMP_READ))
+		return;
 
 	dump_kset = kset_create_and_add("dump", NULL, opal_kobj);
 	if (!dump_kset) {
@@ -509,12 +415,22 @@ void __init opal_platform_dump_init(void)
 		return;
 	}
 
-	rc = opal_notifier_register(&dump_nb);
-	if (rc) {
-		pr_warn("%s: Can't register OPAL event notifier (%d)\n",
-			__func__, rc);
+	dump_irq = opal_event_request(ilog2(OPAL_EVENT_DUMP_AVAIL));
+	if (!dump_irq) {
+		pr_err("%s: Can't register OPAL event irq (%d)\n",
+		       __func__, dump_irq);
 		return;
 	}
 
-	opal_dump_resend_notification();
+	rc = request_threaded_irq(dump_irq, NULL, process_dump,
+				IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
+				"opal-dump", NULL);
+	if (rc) {
+		pr_err("%s: Can't request OPAL event irq (%d)\n",
+		       __func__, rc);
+		return;
+	}
+
+	if (opal_check_token(OPAL_DUMP_RESEND))
+		opal_dump_resend_notification();
 }

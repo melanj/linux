@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backlight code for ATI Radeon based graphic cards
  *
  * Copyright (c) 2000 Ani Joshi <ajoshi@kernel.crashing.org>
  * Copyright (c) 2003 Benjamin Herrenschmidt <benh@kernel.crashing.org>
  * Copyright (c) 2006 Michael Hanselmann <linux-kernel@hansmi.ch>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include "radeonfb.h"
@@ -123,13 +120,7 @@ static int radeon_bl_update_status(struct backlight_device *bd)
 	return 0;
 }
 
-static int radeon_bl_get_brightness(struct backlight_device *bd)
-{
-	return bd->props.brightness;
-}
-
 static const struct backlight_ops radeon_bl_data = {
-	.get_brightness = radeon_bl_get_brightness,
 	.update_status	= radeon_bl_update_status,
 };
 

@@ -41,6 +41,7 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -113,7 +114,7 @@ static int au1100fb_fb_blank(int blank_mode, struct fb_info *fbi)
 	case VESA_NO_BLANKING:
 		/* Turn on panel */
 		fbdev->regs->lcd_control |= LCD_CONTROL_GO;
-		au_sync();
+		wmb(); /* drain writebuffer */
 		break;
 
 	case VESA_VSYNC_SUSPEND:
@@ -121,7 +122,7 @@ static int au1100fb_fb_blank(int blank_mode, struct fb_info *fbi)
 	case VESA_POWERDOWN:
 		/* Turn off panel */
 		fbdev->regs->lcd_control &= ~LCD_CONTROL_GO;
-		au_sync();
+		wmb(); /* drain writebuffer */
 		break;
 	default:
 		break;
@@ -333,44 +334,21 @@ int au1100fb_fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *fbi)
 	return 0;
 }
 
-/* fb_rotate
- * Rotate the display of this angle. This doesn't seems to be used by the core,
- * but as our hardware supports it, so why not implementing it...
- */
-void au1100fb_fb_rotate(struct fb_info *fbi, int angle)
-{
-	struct au1100fb_device *fbdev = to_au1100fb_device(fbi);
-
-	print_dbg("fb_rotate %p %d", fbi, angle);
-
-	if (fbdev && (angle > 0) && !(angle % 90)) {
-
-		fbdev->regs->lcd_control &= ~LCD_CONTROL_GO;
-
-		fbdev->regs->lcd_control &= ~(LCD_CONTROL_SM_MASK);
-		fbdev->regs->lcd_control |= ((angle/90) << LCD_CONTROL_SM_BIT);
-
-		fbdev->regs->lcd_control |= LCD_CONTROL_GO;
-	}
-}
-
 /* fb_mmap
  * Map video memory in user space. We don't use the generic fb_mmap method mainly
  * to allow the use of the TLB streaming flag (CCA=6)
  */
 int au1100fb_fb_mmap(struct fb_info *fbi, struct vm_area_struct *vma)
 {
-	struct au1100fb_device *fbdev;
+	struct au1100fb_device *fbdev = to_au1100fb_device(fbi);
 
-	fbdev = to_au1100fb_device(fbi);
-
-	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 	pgprot_val(vma->vm_page_prot) |= (6 << 9); //CCA=6
 
-	return vm_iomap_memory(vma, fbdev->fb_phys, fbdev->fb_len);
+	return dma_mmap_coherent(fbdev->dev, vma, fbdev->fb_mem, fbdev->fb_phys,
+			fbdev->fb_len);
 }
 
-static struct fb_ops au1100fb_ops =
+static const struct fb_ops au1100fb_ops =
 {
 	.owner			= THIS_MODULE,
 	.fb_setcolreg		= au1100fb_fb_setcolreg,
@@ -379,7 +357,6 @@ static struct fb_ops au1100fb_ops =
 	.fb_fillrect		= cfb_fillrect,
 	.fb_copyarea		= cfb_copyarea,
 	.fb_imageblit		= cfb_imageblit,
-	.fb_rotate		= au1100fb_fb_rotate,
 	.fb_mmap		= au1100fb_fb_mmap,
 };
 
@@ -431,23 +408,20 @@ static int au1100fb_setup(struct au1100fb_device *fbdev)
 
 static int au1100fb_drv_probe(struct platform_device *dev)
 {
-	struct au1100fb_device *fbdev = NULL;
+	struct au1100fb_device *fbdev;
 	struct resource *regs_res;
-	unsigned long page;
-	u32 sys_clksrc;
+	struct clk *c;
 
 	/* Allocate new device private */
-	fbdev = devm_kzalloc(&dev->dev, sizeof(struct au1100fb_device),
-			     GFP_KERNEL);
-	if (!fbdev) {
-		print_err("fail to allocate device private record");
+	fbdev = devm_kzalloc(&dev->dev, sizeof(*fbdev), GFP_KERNEL);
+	if (!fbdev)
 		return -ENOMEM;
-	}
 
 	if (au1100fb_setup(fbdev))
 		goto failed;
 
 	platform_set_drvdata(dev, (void *)fbdev);
+	fbdev->dev = &dev->dev;
 
 	/* Allocate region for our registers and map them */
 	regs_res = platform_get_resource(dev, IORESOURCE_MEM, 0);
@@ -473,6 +447,13 @@ static int au1100fb_drv_probe(struct platform_device *dev)
 	print_dbg("Register memory map at %p", fbdev->regs);
 	print_dbg("phys=0x%08x, size=%d", fbdev->regs_phys, fbdev->regs_len);
 
+	c = clk_get(NULL, "lcd_intclk");
+	if (!IS_ERR(c)) {
+		fbdev->lcdclk = c;
+		clk_set_rate(c, 48000000);
+		clk_prepare_enable(c);
+	}
+
 	/* Allocate the framebuffer to the maximum screen size * nbr of video buffers */
 	fbdev->fb_len = fbdev->panel->xres * fbdev->panel->yres *
 		  	(fbdev->panel->bpp >> 3) * AU1100FB_NBR_VIDEO_BUFFERS;
@@ -481,7 +462,7 @@ static int au1100fb_drv_probe(struct platform_device *dev)
 					    PAGE_ALIGN(fbdev->fb_len),
 					    &fbdev->fb_phys, GFP_KERNEL);
 	if (!fbdev->fb_mem) {
-		print_err("fail to allocate frambuffer (size: %dK))",
+		print_err("fail to allocate framebuffer (size: %dK))",
 			  fbdev->fb_len / 1024);
 		return -ENOMEM;
 	}
@@ -489,26 +470,8 @@ static int au1100fb_drv_probe(struct platform_device *dev)
 	au1100fb_fix.smem_start = fbdev->fb_phys;
 	au1100fb_fix.smem_len = fbdev->fb_len;
 
-	/*
-	 * Set page reserved so that mmap will work. This is necessary
-	 * since we'll be remapping normal memory.
-	 */
-	for (page = (unsigned long)fbdev->fb_mem;
-	     page < PAGE_ALIGN((unsigned long)fbdev->fb_mem + fbdev->fb_len);
-	     page += PAGE_SIZE) {
-#ifdef CONFIG_DMA_NONCOHERENT
-		SetPageReserved(virt_to_page(CAC_ADDR((void *)page)));
-#else
-		SetPageReserved(virt_to_page(page));
-#endif
-	}
-
 	print_dbg("Framebuffer memory map at %p", fbdev->fb_mem);
 	print_dbg("phys=0x%08x, size=%dK", fbdev->fb_phys, fbdev->fb_len / 1024);
-
-	/* Setup LCD clock to AUX (48 MHz) */
-	sys_clksrc = au_readl(SYS_CLKSRC) & ~(SYS_CS_ML_MASK | SYS_CS_DL | SYS_CS_CL);
-	au_writel((sys_clksrc | (1 << SYS_CS_ML_BIT)), SYS_CLKSRC);
 
 	/* load the panel info into the var struct */
 	au1100fb_var.bits_per_pixel = fbdev->panel->bpp;
@@ -522,7 +485,7 @@ static int au1100fb_drv_probe(struct platform_device *dev)
 	fbdev->info.fix = au1100fb_fix;
 
 	fbdev->info.pseudo_palette =
-		devm_kzalloc(&dev->dev, sizeof(u32) * 16, GFP_KERNEL);
+		devm_kcalloc(&dev->dev, 16, sizeof(u32), GFP_KERNEL);
 	if (!fbdev->info.pseudo_palette)
 		return -ENOMEM;
 
@@ -546,9 +509,9 @@ static int au1100fb_drv_probe(struct platform_device *dev)
 	return 0;
 
 failed:
-	if (fbdev->fb_mem) {
-		dma_free_noncoherent(&dev->dev, fbdev->fb_len, fbdev->fb_mem,
-				     fbdev->fb_phys);
+	if (fbdev->lcdclk) {
+		clk_disable_unprepare(fbdev->lcdclk);
+		clk_put(fbdev->lcdclk);
 	}
 	if (fbdev->info.cmap.len != 0) {
 		fb_dealloc_cmap(&fbdev->info.cmap);
@@ -576,11 +539,15 @@ int au1100fb_drv_remove(struct platform_device *dev)
 
 	fb_dealloc_cmap(&fbdev->info.cmap);
 
+	if (fbdev->lcdclk) {
+		clk_disable_unprepare(fbdev->lcdclk);
+		clk_put(fbdev->lcdclk);
+	}
+
 	return 0;
 }
 
 #ifdef CONFIG_PM
-static u32 sys_clksrc;
 static struct au1100fb_regs fbregs;
 
 int au1100fb_drv_suspend(struct platform_device *dev, pm_message_t state)
@@ -590,14 +557,11 @@ int au1100fb_drv_suspend(struct platform_device *dev, pm_message_t state)
 	if (!fbdev)
 		return 0;
 
-	/* Save the clock source state */
-	sys_clksrc = au_readl(SYS_CLKSRC);
-
 	/* Blank the LCD */
 	au1100fb_fb_blank(VESA_POWERDOWN, &fbdev->info);
 
-	/* Stop LCD clocking */
-	au_writel(sys_clksrc & ~SYS_CS_ML_MASK, SYS_CLKSRC);
+	if (fbdev->lcdclk)
+		clk_disable(fbdev->lcdclk);
 
 	memcpy(&fbregs, fbdev->regs, sizeof(struct au1100fb_regs));
 
@@ -613,8 +577,8 @@ int au1100fb_drv_resume(struct platform_device *dev)
 
 	memcpy(fbdev->regs, &fbregs, sizeof(struct au1100fb_regs));
 
-	/* Restart LCD clocking */
-	au_writel(sys_clksrc, SYS_CLKSRC);
+	if (fbdev->lcdclk)
+		clk_enable(fbdev->lcdclk);
 
 	/* Unblank the LCD */
 	au1100fb_fb_blank(VESA_NO_BLANKING, &fbdev->info);
@@ -629,7 +593,6 @@ int au1100fb_drv_resume(struct platform_device *dev)
 static struct platform_driver au1100fb_driver = {
 	.driver = {
 		.name		= "au1100-lcd",
-		.owner          = THIS_MODULE,
 	},
 	.probe		= au1100fb_drv_probe,
         .remove		= au1100fb_drv_remove,

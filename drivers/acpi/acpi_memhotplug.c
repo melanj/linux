@@ -1,25 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2004, 2013 Intel Corporation
  * Author: Naveen B S <naveen.b.s@intel.com>
  * Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
  *
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  *
  * ACPI based HotPlug driver that supports Memory Hotplug
  * This driver fields notifications from firmware for memory add
@@ -44,6 +29,13 @@
 
 ACPI_MODULE_NAME("acpi_memhotplug");
 
+static const struct acpi_device_id memory_device_ids[] = {
+	{ACPI_MEMORY_DEVICE_HID, 0},
+	{"", 0},
+};
+
+#ifdef CONFIG_ACPI_HOTPLUG_MEMORY
+
 /* Memory Device States */
 #define MEMORY_INVALID_STATE	0
 #define MEMORY_POWER_ON_STATE	1
@@ -52,11 +44,6 @@ ACPI_MODULE_NAME("acpi_memhotplug");
 static int acpi_memory_device_add(struct acpi_device *device,
 				  const struct acpi_device_id *not_used);
 static void acpi_memory_device_remove(struct acpi_device *device);
-
-static const struct acpi_device_id memory_device_ids[] = {
-	{ACPI_MEMORY_DEVICE_HID, 0},
-	{"", 0},
-};
 
 static struct acpi_scan_handler memory_device_handler = {
 	.ids = memory_device_ids,
@@ -99,8 +86,8 @@ acpi_memory_get_resource(struct acpi_resource *resource, void *context)
 		/* Can we combine the resource range information? */
 		if ((info->caching == address64.info.mem.caching) &&
 		    (info->write_protect == address64.info.mem.write_protect) &&
-		    (info->start_addr + info->length == address64.minimum)) {
-			info->length += address64.address_length;
+		    (info->start_addr + info->length == address64.address.minimum)) {
+			info->length += address64.address.address_length;
 			return AE_OK;
 		}
 	}
@@ -112,8 +99,8 @@ acpi_memory_get_resource(struct acpi_resource *resource, void *context)
 	INIT_LIST_HEAD(&new->list);
 	new->caching = address64.info.mem.caching;
 	new->write_protect = address64.info.mem.write_protect;
-	new->start_addr = address64.minimum;
-	new->length = address64.address_length;
+	new->start_addr = address64.address.minimum;
+	new->length = address64.address.address_length;
 	list_add_tail(&new->list, &mem_device->res_list);
 
 	return AE_OK;
@@ -168,16 +155,6 @@ static int acpi_memory_check_device(struct acpi_memory_device *mem_device)
 	return 0;
 }
 
-static unsigned long acpi_meminfo_start_pfn(struct acpi_memory_info *info)
-{
-	return PFN_DOWN(info->start_addr);
-}
-
-static unsigned long acpi_meminfo_end_pfn(struct acpi_memory_info *info)
-{
-	return PFN_UP(info->start_addr + info->length-1);
-}
-
 static int acpi_bind_memblk(struct memory_block *mem, void *arg)
 {
 	return acpi_bind_one(&mem->dev, arg);
@@ -186,9 +163,8 @@ static int acpi_bind_memblk(struct memory_block *mem, void *arg)
 static int acpi_bind_memory_blocks(struct acpi_memory_info *info,
 				   struct acpi_device *adev)
 {
-	return walk_memory_range(acpi_meminfo_start_pfn(info),
-				 acpi_meminfo_end_pfn(info), adev,
-				 acpi_bind_memblk);
+	return walk_memory_blocks(info->start_addr, info->length, adev,
+				  acpi_bind_memblk);
 }
 
 static int acpi_unbind_memblk(struct memory_block *mem, void *arg)
@@ -199,8 +175,8 @@ static int acpi_unbind_memblk(struct memory_block *mem, void *arg)
 
 static void acpi_unbind_memory_blocks(struct acpi_memory_info *info)
 {
-	walk_memory_range(acpi_meminfo_start_pfn(info),
-			  acpi_meminfo_end_pfn(info), NULL, acpi_unbind_memblk);
+	walk_memory_blocks(info->start_addr, info->length, NULL,
+			   acpi_unbind_memblk);
 }
 
 static int acpi_memory_enable_device(struct acpi_memory_device *mem_device)
@@ -231,7 +207,7 @@ static int acpi_memory_enable_device(struct acpi_memory_device *mem_device)
 		if (node < 0)
 			node = memory_add_physaddr_to_nid(info->start_addr);
 
-		result = add_memory(node, info->start_addr, info->length);
+		result = __add_memory(node, info->start_addr, info->length);
 
 		/*
 		 * If the memory block has been used by the kernel, add_memory()
@@ -285,7 +261,7 @@ static void acpi_memory_remove_memory(struct acpi_memory_device *mem_device)
 			nid = memory_add_physaddr_to_nid(info->start_addr);
 
 		acpi_unbind_memory_blocks(info);
-		remove_memory(nid, info->start_addr, info->length);
+		__remove_memory(nid, info->start_addr, info->length);
 		list_del(&info->list);
 		kfree(info);
 	}
@@ -364,9 +340,11 @@ static bool __initdata acpi_no_memhotplug;
 
 void __init acpi_memory_hotplug_init(void)
 {
-	if (acpi_no_memhotplug)
+	if (acpi_no_memhotplug) {
+		memory_device_handler.attach = NULL;
+		acpi_scan_add_handler(&memory_device_handler);
 		return;
-
+	}
 	acpi_scan_add_handler_with_hotplug(&memory_device_handler, "memory");
 }
 
@@ -376,3 +354,16 @@ static int __init disable_acpi_memory_hotplug(char *str)
 	return 1;
 }
 __setup("acpi_no_memhotplug", disable_acpi_memory_hotplug);
+
+#else
+
+static struct acpi_scan_handler memory_device_handler = {
+	.ids = memory_device_ids,
+};
+
+void __init acpi_memory_hotplug_init(void)
+{
+	acpi_scan_add_handler(&memory_device_handler);
+}
+
+#endif /* CONFIG_ACPI_HOTPLUG_MEMORY */

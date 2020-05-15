@@ -1,12 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (c) 2013 Samsung Electronics Co., Ltd
  *		http://www.samsung.com
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #ifndef __LINUX_MFD_S2MPA01_H
@@ -154,18 +149,6 @@ enum s2mpa01_regulators {
 
 	S2MPA01_REGULATOR_MAX,
 };
-
-#define S2MPA01_BUCK_MIN1	600000
-#define S2MPA01_BUCK_MIN2	800000
-#define S2MPA01_BUCK_MIN3	1000000
-#define S2MPA01_BUCK_MIN4	1500000
-#define S2MPA01_LDO_MIN		800000
-
-#define S2MPA01_BUCK_STEP1	6250
-#define S2MPA01_BUCK_STEP2	12500
-
-#define S2MPA01_LDO_STEP1	50000
-#define S2MPA01_LDO_STEP2	25000
 
 #define S2MPA01_LDO_VSEL_MASK	0x3F
 #define S2MPA01_BUCK_VSEL_MASK	0xFF

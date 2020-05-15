@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
  * Copyright 2006-2013 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
  */
 
 #ifndef EFX_IO_H
@@ -66,9 +63,16 @@
 #define EFX_USE_QWORD_IO 1
 #endif
 
+/* Hardware issue requires that only 64-bit naturally aligned writes
+ * are seen by hardware. Its not strictly necessary to restrict to
+ * x86_64 arch, but done for safety since unusual write combining behaviour
+ * can break PIO.
+ */
+#ifdef CONFIG_X86_64
 /* PIO is a win only if write-combining is possible */
 #ifdef ARCH_HAS_IOREMAP_WC
 #define EFX_USE_PIO 1
+#endif
 #endif
 
 #ifdef EFX_USE_QWORD_IO
@@ -113,7 +117,6 @@ static inline void efx_writeo(struct efx_nic *efx, const efx_oword_t *value,
 	_efx_writed(efx, value->u32[2], reg + 8);
 	_efx_writed(efx, value->u32[3], reg + 12);
 #endif
-	mmiowb();
 	spin_unlock_irqrestore(&efx->biu_lock, flags);
 }
 
@@ -135,7 +138,6 @@ static inline void efx_sram_writeq(struct efx_nic *efx, void __iomem *membase,
 	__raw_writel((__force u32)value->u32[0], membase + addr);
 	__raw_writel((__force u32)value->u32[1], membase + addr + 4);
 #endif
-	mmiowb();
 	spin_unlock_irqrestore(&efx->biu_lock, flags);
 }
 
@@ -215,18 +217,21 @@ static inline void efx_reado_table(struct efx_nic *efx, efx_oword_t *value,
 	efx_reado(efx, value, reg + index * sizeof(efx_oword_t));
 }
 
-/* Page size used as step between per-VI registers */
-#define EFX_VI_PAGE_SIZE 0x2000
+/* default VI stride (step between per-VI registers) is 8K */
+#define EFX_DEFAULT_VI_STRIDE 0x2000
 
 /* Calculate offset to page-mapped register */
-#define EFX_PAGED_REG(page, reg) \
-	((page) * EFX_VI_PAGE_SIZE + (reg))
+static inline unsigned int efx_paged_reg(struct efx_nic *efx, unsigned int page,
+					 unsigned int reg)
+{
+	return page * efx->vi_stride + reg;
+}
 
 /* Write the whole of RX_DESC_UPD or TX_DESC_UPD */
 static inline void _efx_writeo_page(struct efx_nic *efx, efx_oword_t *value,
 				    unsigned int reg, unsigned int page)
 {
-	reg = EFX_PAGED_REG(page, reg);
+	reg = efx_paged_reg(efx, page, reg);
 
 	netif_vdbg(efx, hw, efx->net_dev,
 		   "writing register %x with " EFX_OWORD_FMT "\n", reg,
@@ -255,7 +260,7 @@ static inline void
 _efx_writed_page(struct efx_nic *efx, const efx_dword_t *value,
 		 unsigned int reg, unsigned int page)
 {
-	efx_writed(efx, value, EFX_PAGED_REG(page, reg));
+	efx_writed(efx, value, efx_paged_reg(efx, page, reg));
 }
 #define efx_writed_page(efx, value, reg, page)				\
 	_efx_writed_page(efx, value,					\
@@ -281,10 +286,10 @@ static inline void _efx_writed_page_locked(struct efx_nic *efx,
 
 	if (page == 0) {
 		spin_lock_irqsave(&efx->biu_lock, flags);
-		efx_writed(efx, value, EFX_PAGED_REG(page, reg));
+		efx_writed(efx, value, efx_paged_reg(efx, page, reg));
 		spin_unlock_irqrestore(&efx->biu_lock, flags);
 	} else {
-		efx_writed(efx, value, EFX_PAGED_REG(page, reg));
+		efx_writed(efx, value, efx_paged_reg(efx, page, reg));
 	}
 }
 #define efx_writed_page_locked(efx, value, reg, page)			\

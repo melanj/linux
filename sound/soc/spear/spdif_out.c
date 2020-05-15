@@ -282,10 +282,8 @@ static int spdif_out_probe(struct platform_device *pdev)
 	int ret;
 
 	host = devm_kzalloc(&pdev->dev, sizeof(*host), GFP_KERNEL);
-	if (!host) {
-		dev_warn(&pdev->dev, "kzalloc fail\n");
+	if (!host)
 		return -ENOMEM;
-	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	host->io_base = devm_ioremap_resource(&pdev->dev, res);
@@ -354,7 +352,6 @@ static struct platform_driver spdif_out_driver = {
 	.probe		= spdif_out_probe,
 	.driver		= {
 		.name	= "spdif-out",
-		.owner	= THIS_MODULE,
 		.pm	= SPDIF_OUT_DEV_PM_OPS,
 	},
 };

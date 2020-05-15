@@ -1,7 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) ST-Ericsson SA 2010
  *
- * License Terms: GNU General Public License v2
  * Author: Srinidhi Kasagar <srinidhi.kasagar@stericsson.com>
  */
 #ifndef MFD_AB8500_H
@@ -62,6 +62,8 @@ enum ab8500_version {
 #define AB8500_PROD_TEST	0x13
 #define AB8500_STE_TEST		0x14
 #define AB8500_OTP_EMUL		0x15
+
+#define AB8500_DEBUG_FIELD_LAST	0x16
 
 /*
  * Interrupts
@@ -505,6 +507,7 @@ static inline int is_ab9540_2p0_or_earlier(struct ab8500 *ab)
 void ab8500_override_turn_on_stat(u8 mask, u8 set);
 
 #ifdef CONFIG_AB8500_DEBUG
+extern int prcmu_abb_read(u8 slave, u8 reg, u8 *value, u8 size);
 void ab8500_dump_all_banks(struct device *dev);
 void ab8500_debug_register_interrupt(int line);
 #else

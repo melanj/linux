@@ -35,7 +35,7 @@
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 
@@ -47,12 +47,6 @@
 #include <asm/MC68328.h>
 #else
 #error wrong architecture for the MC68x328 frame buffer device
-#endif
-
-#if defined(CONFIG_FB_68328_INVERT)
-#define MC68X328FB_MONO_VISUAL FB_VISUAL_MONO01
-#else
-#define MC68X328FB_MONO_VISUAL FB_VISUAL_MONO10
 #endif
 
 static u_long videomemory;
@@ -78,7 +72,7 @@ static struct fb_var_screeninfo mc68x328fb_default __initdata = {
       	.vmode =	FB_VMODE_NONINTERLACED,
 };
 
-static struct fb_fix_screeninfo mc68x328fb_fix __initdata = {
+static const struct fb_fix_screeninfo mc68x328fb_fix __initconst = {
 	.id =		"68328fb",
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.xpanstep =	1,
@@ -102,7 +96,7 @@ static int mc68x328fb_pan_display(struct fb_var_screeninfo *var,
 			   struct fb_info *info);
 static int mc68x328fb_mmap(struct fb_info *info, struct vm_area_struct *vma);
 
-static struct fb_ops mc68x328fb_ops = {
+static const struct fb_ops mc68x328fb_ops = {
 	.fb_check_var	= mc68x328fb_check_var,
 	.fb_set_par	= mc68x328fb_set_par,
 	.fb_setcolreg	= mc68x328fb_setcolreg,
@@ -411,20 +405,8 @@ static int mc68x328fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 
 int __init mc68x328fb_setup(char *options)
 {
-#if 0
-	char *this_opt;
-#endif
-
 	if (!options || !*options)
 		return 1;
-#if 0
-	while ((this_opt = strsep(&options, ",")) != NULL) {
-		if (!*this_opt)
-			continue;
-		if (!strncmp(this_opt, "disable", 7))
-			mc68x328fb_enable = 0;
-	}
-#endif
 	return 1;
 }
 
@@ -462,7 +444,7 @@ int __init mc68x328fb_init(void)
 	fb_info.fix.line_length =
 		get_line_length(mc68x328fb_default.xres_virtual, mc68x328fb_default.bits_per_pixel);
 	fb_info.fix.visual = (mc68x328fb_default.bits_per_pixel) == 1 ?
-		MC68X328FB_MONO_VISUAL : FB_VISUAL_PSEUDOCOLOR;
+		FB_VISUAL_MONO10 : FB_VISUAL_PSEUDOCOLOR;
 	if (fb_info.var.bits_per_pixel == 1) {
 		fb_info.var.red.length = fb_info.var.green.length = fb_info.var.blue.length = 1;
 		fb_info.var.red.offset = fb_info.var.green.offset = fb_info.var.blue.offset = 0;

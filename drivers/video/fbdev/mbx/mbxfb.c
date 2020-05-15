@@ -74,12 +74,12 @@ struct mbxfb_info {
 
 	u32 pseudo_palette[MAX_PALETTES];
 #ifdef CONFIG_FB_MBX_DEBUG
-	void *debugfs_data;
+	struct dentry *debugfs_dir;
 #endif
 
 };
 
-static struct fb_var_screeninfo mbxfb_default = {
+static const struct fb_var_screeninfo mbxfb_default = {
 	.xres = 640,
 	.yres = 480,
 	.xres_virtual = 640,
@@ -102,7 +102,7 @@ static struct fb_var_screeninfo mbxfb_default = {
 	.sync = FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
 };
 
-static struct fb_fix_screeninfo mbxfb_fix = {
+static const struct fb_fix_screeninfo mbxfb_fix = {
 	.id = "MBX",
 	.type = FB_TYPE_PACKED_PIXELS,
 	.visual = FB_VISUAL_TRUECOLOR,
@@ -628,14 +628,14 @@ static int mbxfb_ioctl(struct fb_info *info, unsigned int cmd,
 		case MBXFB_IOCS_PLANEORDER:
 			if (copy_from_user(&porder, (void __user*)arg,
 					sizeof(struct mbxfb_planeorder)))
-			return -EFAULT;
+				return -EFAULT;
 
 			return mbxfb_ioctl_planeorder(&porder);
 
 		case MBXFB_IOCS_ALPHA:
 			if (copy_from_user(&alpha, (void __user*)arg,
 					sizeof(struct mbxfb_alphaCtl)))
-			return -EFAULT;
+				return -EFAULT;
 
 			return mbxfb_ioctl_alphactl(&alpha);
 
@@ -671,7 +671,7 @@ static int mbxfb_ioctl(struct fb_info *info, unsigned int cmd,
 	return -EINVAL;
 }
 
-static struct fb_ops mbxfb_ops = {
+static const struct fb_ops mbxfb_ops = {
 	.owner = THIS_MODULE,
 	.fb_check_var = mbxfb_check_var,
 	.fb_set_par = mbxfb_set_par,
@@ -877,6 +877,8 @@ static int mbxfb_resume(struct platform_device *dev)
 #ifndef CONFIG_FB_MBX_DEBUG
 #define mbxfb_debugfs_init(x)	do {} while(0)
 #define mbxfb_debugfs_remove(x)	do {} while(0)
+#else
+#include "mbxdebugfs.c"
 #endif
 
 #define res_size(_r) (((_r)->end - (_r)->start) + 1)
@@ -897,10 +899,8 @@ static int mbxfb_probe(struct platform_device *dev)
 	}
 
 	fbi = framebuffer_alloc(sizeof(struct mbxfb_info), &dev->dev);
-	if (fbi == NULL) {
-		dev_err(&dev->dev, "framebuffer_alloc failed\n");
+	if (!fbi)
 		return -ENOMEM;
-	}
 
 	mfbi = fbi->par;
 	fbi->pseudo_palette = mfbi->pseudo_palette;
@@ -938,7 +938,7 @@ static int mbxfb_probe(struct platform_device *dev)
 	}
 	mfbi->reg_phys_addr = mfbi->reg_res->start;
 
-	mfbi->reg_virt_addr = devm_ioremap_nocache(&dev->dev,
+	mfbi->reg_virt_addr = devm_ioremap(&dev->dev,
 						   mfbi->reg_phys_addr,
 						   res_size(mfbi->reg_req));
 	if (!mfbi->reg_virt_addr) {
@@ -948,7 +948,7 @@ static int mbxfb_probe(struct platform_device *dev)
 	}
 	virt_base_2700 = mfbi->reg_virt_addr;
 
-	mfbi->fb_virt_addr = devm_ioremap_nocache(&dev->dev, mfbi->fb_phys_addr,
+	mfbi->fb_virt_addr = devm_ioremap(&dev->dev, mfbi->fb_phys_addr,
 						  res_size(mfbi->fb_req));
 	if (!mfbi->fb_virt_addr) {
 		dev_err(&dev->dev, "failed to ioremap frame buffer\n");

@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Copyright (C) 2013 Daniel Tang <tangrs@tangrs.id.au>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2, as
- * published by the Free Software Foundation.
  */
 
 #include <linux/input/matrix_keypad.h>
@@ -168,10 +165,8 @@ static int nspire_keypad_probe(struct platform_device *pdev)
 	int error;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "failed to get keypad irq\n");
+	if (irq < 0)
 		return -EINVAL;
-	}
 
 	keypad = devm_kzalloc(&pdev->dev, sizeof(struct nspire_keypad),
 			      GFP_KERNEL);
@@ -249,8 +244,6 @@ static int nspire_keypad_probe(struct platform_device *pdev)
 		return error;
 	}
 
-	platform_set_drvdata(pdev, keypad);
-
 	dev_dbg(&pdev->dev,
 		"TI-NSPIRE keypad at %pR (scan_interval=%uus, row_delay=%uus%s)\n",
 		res, keypad->row_delay, keypad->scan_interval,
@@ -268,7 +261,6 @@ MODULE_DEVICE_TABLE(of, nspire_keypad_dt_match);
 static struct platform_driver nspire_keypad_driver = {
 	.driver = {
 		.name = "nspire-keypad",
-		.owner = THIS_MODULE,
 		.of_match_table = nspire_keypad_dt_match,
 	},
 	.probe = nspire_keypad_probe,

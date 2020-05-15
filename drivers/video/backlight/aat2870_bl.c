@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/drivers/video/backlight/aat2870_bl.c
  *
  * Copyright (c) 2011, NVIDIA Corporation.
  * Author: Jin Park <jinyoungp@nvidia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
  */
 
 #include <linux/module.h>
@@ -67,11 +54,6 @@ static inline int aat2870_bl_disable(struct aat2870_bl_driver_data *aat2870_bl)
 	return aat2870->write(aat2870, AAT2870_BL_CH_EN, 0x0);
 }
 
-static int aat2870_bl_get_brightness(struct backlight_device *bd)
-{
-	return bd->props.brightness;
-}
-
 static int aat2870_bl_update_status(struct backlight_device *bd)
 {
 	struct aat2870_bl_driver_data *aat2870_bl = bl_get_data(bd);
@@ -120,7 +102,6 @@ static int aat2870_bl_check_fb(struct backlight_device *bd, struct fb_info *fi)
 
 static const struct backlight_ops aat2870_bl_ops = {
 	.options = BL_CORE_SUSPENDRESUME,
-	.get_brightness = aat2870_bl_get_brightness,
 	.update_status = aat2870_bl_update_status,
 	.check_fb = aat2870_bl_check_fb,
 };
@@ -217,7 +198,6 @@ static int aat2870_bl_remove(struct platform_device *pdev)
 static struct platform_driver aat2870_bl_driver = {
 	.driver = {
 		.name	= "aat2870-backlight",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= aat2870_bl_probe,
 	.remove		= aat2870_bl_remove,

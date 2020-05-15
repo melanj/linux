@@ -1,12 +1,8 @@
-/* Copyright 2011-2013 Autronica Fire and Security AS
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright 2011-2014 Autronica Fire and Security AS
  *
  * Author(s):
- *	2011-2013 Arvid Brodin, arvid.brodin@xdin.com
+ *	2011-2014 Arvid Brodin, arvid.brodin@alten.se
  */
 
 #ifndef __HSR_DEVICE_H
@@ -17,13 +13,10 @@
 
 void hsr_dev_setup(struct net_device *dev);
 int hsr_dev_finalize(struct net_device *hsr_dev, struct net_device *slave[2],
-		     unsigned char multicast_spec);
-void hsr_set_operstate(struct net_device *hsr_dev, struct net_device *slave1,
-		       struct net_device *slave2);
-void hsr_set_carrier(struct net_device *hsr_dev, struct net_device *slave1,
-		     struct net_device *slave2);
-void hsr_check_announce(struct net_device *hsr_dev, int old_operstate);
+		     unsigned char multicast_spec, u8 protocol_version,
+		     struct netlink_ext_ack *extack);
+void hsr_check_carrier_and_operstate(struct hsr_priv *hsr);
 bool is_hsr_master(struct net_device *dev);
-int hsr_get_max_mtu(struct hsr_priv *hsr_priv);
+int hsr_get_max_mtu(struct hsr_priv *hsr);
 
 #endif /* __HSR_DEVICE_H */

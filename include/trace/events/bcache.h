@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM bcache
 
@@ -21,13 +22,13 @@ DECLARE_EVENT_CLASS(bcache_request,
 	),
 
 	TP_fast_assign(
-		__entry->dev		= bio->bi_bdev->bd_dev;
+		__entry->dev		= bio_dev(bio);
 		__entry->orig_major	= d->disk->major;
 		__entry->orig_minor	= d->disk->first_minor;
 		__entry->sector		= bio->bi_iter.bi_sector;
 		__entry->orig_sector	= bio->bi_iter.bi_sector - 16;
 		__entry->nr_sector	= bio->bi_iter.bi_size >> 9;
-		blk_fill_rwbs(__entry->rwbs, bio->bi_rw, bio->bi_iter.bi_size);
+		blk_fill_rwbs(__entry->rwbs, bio->bi_opf, bio->bi_iter.bi_size);
 	),
 
 	TP_printk("%d,%d %s %llu + %u (from %d,%d @ %llu)",
@@ -98,10 +99,10 @@ DECLARE_EVENT_CLASS(bcache_bio,
 	),
 
 	TP_fast_assign(
-		__entry->dev		= bio->bi_bdev->bd_dev;
+		__entry->dev		= bio_dev(bio);
 		__entry->sector		= bio->bi_iter.bi_sector;
 		__entry->nr_sector	= bio->bi_iter.bi_size >> 9;
-		blk_fill_rwbs(__entry->rwbs, bio->bi_rw, bio->bi_iter.bi_size);
+		blk_fill_rwbs(__entry->rwbs, bio->bi_opf, bio->bi_iter.bi_size);
 	),
 
 	TP_printk("%d,%d  %s %llu + %u",
@@ -133,10 +134,10 @@ TRACE_EVENT(bcache_read,
 	),
 
 	TP_fast_assign(
-		__entry->dev		= bio->bi_bdev->bd_dev;
+		__entry->dev		= bio_dev(bio);
 		__entry->sector		= bio->bi_iter.bi_sector;
 		__entry->nr_sector	= bio->bi_iter.bi_size >> 9;
-		blk_fill_rwbs(__entry->rwbs, bio->bi_rw, bio->bi_iter.bi_size);
+		blk_fill_rwbs(__entry->rwbs, bio->bi_opf, bio->bi_iter.bi_size);
 		__entry->cache_hit = hit;
 		__entry->bypass = bypass;
 	),
@@ -148,11 +149,13 @@ TRACE_EVENT(bcache_read,
 );
 
 TRACE_EVENT(bcache_write,
-	TP_PROTO(struct bio *bio, bool writeback, bool bypass),
-	TP_ARGS(bio, writeback, bypass),
+	TP_PROTO(struct cache_set *c, u64 inode, struct bio *bio,
+		bool writeback, bool bypass),
+	TP_ARGS(c, inode, bio, writeback, bypass),
 
 	TP_STRUCT__entry(
-		__field(dev_t,		dev			)
+		__array(char,		uuid,	16		)
+		__field(u64,		inode			)
 		__field(sector_t,	sector			)
 		__field(unsigned int,	nr_sector		)
 		__array(char,		rwbs,	6		)
@@ -161,16 +164,17 @@ TRACE_EVENT(bcache_write,
 	),
 
 	TP_fast_assign(
-		__entry->dev		= bio->bi_bdev->bd_dev;
+		memcpy(__entry->uuid, c->sb.set_uuid, 16);
+		__entry->inode		= inode;
 		__entry->sector		= bio->bi_iter.bi_sector;
 		__entry->nr_sector	= bio->bi_iter.bi_size >> 9;
-		blk_fill_rwbs(__entry->rwbs, bio->bi_rw, bio->bi_iter.bi_size);
+		blk_fill_rwbs(__entry->rwbs, bio->bi_opf, bio->bi_iter.bi_size);
 		__entry->writeback = writeback;
 		__entry->bypass = bypass;
 	),
 
-	TP_printk("%d,%d  %s %llu + %u hit %u bypass %u",
-		  MAJOR(__entry->dev), MINOR(__entry->dev),
+	TP_printk("%pU inode %llu  %s %llu + %u hit %u bypass %u",
+		  __entry->uuid, __entry->inode,
 		  __entry->rwbs, (unsigned long long)__entry->sector,
 		  __entry->nr_sector, __entry->writeback, __entry->bypass)
 );
@@ -217,9 +221,30 @@ DEFINE_EVENT(cache_set, bcache_journal_entry_full,
 	TP_ARGS(c)
 );
 
-DEFINE_EVENT(bcache_bio, bcache_journal_write,
-	TP_PROTO(struct bio *bio),
-	TP_ARGS(bio)
+TRACE_EVENT(bcache_journal_write,
+	TP_PROTO(struct bio *bio, u32 keys),
+	TP_ARGS(bio, keys),
+
+	TP_STRUCT__entry(
+		__field(dev_t,		dev			)
+		__field(sector_t,	sector			)
+		__field(unsigned int,	nr_sector		)
+		__array(char,		rwbs,	6		)
+		__field(u32,		nr_keys			)
+	),
+
+	TP_fast_assign(
+		__entry->dev		= bio_dev(bio);
+		__entry->sector		= bio->bi_iter.bi_sector;
+		__entry->nr_sector	= bio->bi_iter.bi_size >> 9;
+		__entry->nr_keys	= keys;
+		blk_fill_rwbs(__entry->rwbs, bio->bi_opf, bio->bi_iter.bi_size);
+	),
+
+	TP_printk("%d,%d  %s %llu + %u keys %u",
+		  MAJOR(__entry->dev), MINOR(__entry->dev), __entry->rwbs,
+		  (unsigned long long)__entry->sector, __entry->nr_sector,
+		  __entry->nr_keys)
 );
 
 /* Btree */
@@ -250,7 +275,8 @@ TRACE_EVENT(bcache_btree_write,
 		__entry->keys	= b->keys.set[b->keys.nsets].data->keys;
 	),
 
-	TP_printk("bucket %zu", __entry->bucket)
+	TP_printk("bucket %zu written block %u + %u",
+		__entry->bucket, __entry->block, __entry->keys)
 );
 
 DEFINE_EVENT(btree_node, bcache_btree_node_alloc,
@@ -258,9 +284,9 @@ DEFINE_EVENT(btree_node, bcache_btree_node_alloc,
 	TP_ARGS(b)
 );
 
-DEFINE_EVENT(btree_node, bcache_btree_node_alloc_fail,
-	TP_PROTO(struct btree *b),
-	TP_ARGS(b)
+DEFINE_EVENT(cache_set, bcache_btree_node_alloc_fail,
+	TP_PROTO(struct cache_set *c),
+	TP_ARGS(c)
 );
 
 DEFINE_EVENT(btree_node, bcache_btree_node_free,

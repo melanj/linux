@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Samsung EXYNOS4x12 FIMC-IS (Imaging Subsystem) driver
  *
@@ -5,10 +6,6 @@
  *
  * Authors: Younghwan Joo <yhwan.joo@samsung.com>
  *          Sylwester Nawrocki <s.nawrocki@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define pr_fmt(fmt) "%s:%d " fmt, __func__, __LINE__
 
@@ -667,7 +664,6 @@ void __is_set_fd_config_orientation_val(struct fimc_is *is, u32 val)
 void fimc_is_set_initial_params(struct fimc_is *is)
 {
 	struct global_param *global;
-	struct sensor_param *sensor;
 	struct isp_param *isp;
 	struct drc_param *drc;
 	struct fd_param *fd;
@@ -676,7 +672,6 @@ void fimc_is_set_initial_params(struct fimc_is *is)
 
 	index = is->config_index;
 	global = &is->config[index].global;
-	sensor = &is->config[index].sensor;
 	isp = &is->config[index].isp;
 	drc = &is->config[index].drc;
 	fd = &is->config[index].fd;

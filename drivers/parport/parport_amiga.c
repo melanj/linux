@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Low-level parallel port routines for the Amiga built-in port
  *
  * Author: Joerg Dorchain <joerg@dorchain.net>
@@ -239,7 +240,6 @@ static struct platform_driver amiga_parallel_driver = {
 	.remove = __exit_p(amiga_parallel_remove),
 	.driver   = {
 		.name	= "amiga-parallel",
-		.owner	= THIS_MODULE,
 	},
 };
 

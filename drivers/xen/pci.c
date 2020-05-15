@@ -1,24 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2009, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
- * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Author: Weidong Han <weidong.han@intel.com>
  */
 
 #include <linux/pci.h>
 #include <linux/acpi.h>
+#include <linux/pci-acpi.h>
 #include <xen/xen.h>
 #include <xen/interface/physdev.h>
 #include <xen/interface/xen.h>
@@ -28,6 +17,8 @@
 #include "../pci/pci.h"
 #ifdef CONFIG_PCI_MMCONFIG
 #include <asm/pci_x86.h>
+
+static int xen_mcfg_late(void);
 #endif
 
 static bool __read_mostly pci_seg_supported = true;
@@ -39,35 +30,61 @@ static int xen_add_device(struct device *dev)
 #ifdef CONFIG_PCI_IOV
 	struct pci_dev *physfn = pci_dev->physfn;
 #endif
-
+#ifdef CONFIG_PCI_MMCONFIG
+	static bool pci_mcfg_reserved = false;
+	/*
+	 * Reserve MCFG areas in Xen on first invocation due to this being
+	 * potentially called from inside of acpi_init immediately after
+	 * MCFG table has been finally parsed.
+	 */
+	if (!pci_mcfg_reserved) {
+		xen_mcfg_late();
+		pci_mcfg_reserved = true;
+	}
+#endif
 	if (pci_seg_supported) {
-		struct physdev_pci_device_add add = {
-			.seg = pci_domain_nr(pci_dev->bus),
-			.bus = pci_dev->bus->number,
-			.devfn = pci_dev->devfn
+		struct {
+			struct physdev_pci_device_add add;
+			uint32_t pxm;
+		} add_ext = {
+			.add.seg = pci_domain_nr(pci_dev->bus),
+			.add.bus = pci_dev->bus->number,
+			.add.devfn = pci_dev->devfn
 		};
+		struct physdev_pci_device_add *add = &add_ext.add;
+
 #ifdef CONFIG_ACPI
 		acpi_handle handle;
 #endif
 
 #ifdef CONFIG_PCI_IOV
 		if (pci_dev->is_virtfn) {
-			add.flags = XEN_PCI_DEV_VIRTFN;
-			add.physfn.bus = physfn->bus->number;
-			add.physfn.devfn = physfn->devfn;
+			add->flags = XEN_PCI_DEV_VIRTFN;
+			add->physfn.bus = physfn->bus->number;
+			add->physfn.devfn = physfn->devfn;
 		} else
 #endif
 		if (pci_ari_enabled(pci_dev->bus) && PCI_SLOT(pci_dev->devfn))
-			add.flags = XEN_PCI_DEV_EXTFN;
+			add->flags = XEN_PCI_DEV_EXTFN;
 
 #ifdef CONFIG_ACPI
 		handle = ACPI_HANDLE(&pci_dev->dev);
-		if (!handle && pci_dev->bus->bridge)
-			handle = ACPI_HANDLE(pci_dev->bus->bridge);
 #ifdef CONFIG_PCI_IOV
 		if (!handle && pci_dev->is_virtfn)
 			handle = ACPI_HANDLE(physfn->bus->bridge);
 #endif
+		if (!handle) {
+			/*
+			 * This device was not listed in the ACPI name space at
+			 * all. Try to get acpi handle of parent pci bus.
+			 */
+			struct pci_bus *pbus;
+			for (pbus = pci_dev->bus; pbus; pbus = pbus->parent) {
+				handle = acpi_pci_get_bridge_handle(pbus);
+				if (handle)
+					break;
+			}
+		}
 		if (handle) {
 			acpi_status status;
 
@@ -77,8 +94,8 @@ static int xen_add_device(struct device *dev)
 				status = acpi_evaluate_integer(handle, "_PXM",
 							       NULL, &pxm);
 				if (ACPI_SUCCESS(status)) {
-					add.optarr[0] = pxm;
-					add.flags |= XEN_PCI_DEV_PXM;
+					add->optarr[0] = pxm;
+					add->flags |= XEN_PCI_DEV_PXM;
 					break;
 				}
 				status = acpi_get_parent(handle, &handle);
@@ -86,7 +103,7 @@ static int xen_add_device(struct device *dev)
 		}
 #endif /* CONFIG_ACPI */
 
-		r = HYPERVISOR_physdev_op(PHYSDEVOP_pci_device_add, &add);
+		r = HYPERVISOR_physdev_op(PHYSDEVOP_pci_device_add, add);
 		if (r != -ENOSYS)
 			return r;
 		pci_seg_supported = false;
@@ -197,7 +214,7 @@ static int __init register_xen_pci_notifier(void)
 arch_initcall(register_xen_pci_notifier);
 
 #ifdef CONFIG_PCI_MMCONFIG
-static int __init xen_mcfg_late(void)
+static int xen_mcfg_late(void)
 {
 	struct pci_mmcfg_region *cfg;
 	int rc;
@@ -236,8 +253,4 @@ static int __init xen_mcfg_late(void)
 	}
 	return 0;
 }
-/*
- * Needs to be done after acpi_init which are subsys_initcall.
- */
-subsys_initcall_sync(xen_mcfg_late);
 #endif

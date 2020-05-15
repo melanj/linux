@@ -18,8 +18,8 @@
 
 #include <linux/nl80211.h>
 #include <linux/platform_device.h>
-#include <linux/ath9k_platform.h>
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include "ath9k.h"
 
 static const struct platform_device_id ath9k_platform_id_table[] = {
@@ -43,6 +43,10 @@ static const struct platform_device_id ath9k_platform_id_table[] = {
 		.name = "qca953x_wmac",
 		.driver_data = AR9300_DEVID_AR953X,
 	},
+	{
+		.name = "qca956x_wmac",
+		.driver_data = AR9300_DEVID_QCA956X,
+	},
 	{},
 };
 
@@ -54,23 +58,12 @@ static void ath_ahb_read_cachesize(struct ath_common *common, int *csz)
 
 static bool ath_ahb_eeprom_read(struct ath_common *common, u32 off, u16 *data)
 {
-	struct ath_softc *sc = (struct ath_softc *)common->priv;
-	struct platform_device *pdev = to_platform_device(sc->dev);
-	struct ath9k_platform_data *pdata;
-
-	pdata = dev_get_platdata(&pdev->dev);
-	if (off >= (ARRAY_SIZE(pdata->eeprom_data))) {
-		ath_err(common,
-			"%s: flash read failed, offset %08x is out of range\n",
-			__func__, off);
-		return false;
-	}
-
-	*data = pdata->eeprom_data[off];
-	return true;
+	ath_err(common, "%s: eeprom data has to be provided externally\n",
+		__func__);
+	return false;
 }
 
-static struct ath_bus_ops ath_ahb_bus_ops  = {
+static const struct ath_bus_ops ath_ahb_bus_ops  = {
 	.ath_bus_type = ATH_AHB,
 	.read_cachesize = ath_ahb_read_cachesize,
 	.eeprom_read = ath_ahb_eeprom_read,
@@ -86,7 +79,6 @@ static int ath_ahb_probe(struct platform_device *pdev)
 	int irq;
 	int ret = 0;
 	struct ath_hw *ah;
-	struct ath_common *common;
 	char hw_name[64];
 
 	if (!dev_get_platdata(&pdev->dev)) {
@@ -100,7 +92,7 @@ static int ath_ahb_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-	mem = devm_ioremap_nocache(&pdev->dev, res->start, resource_size(res));
+	mem = devm_ioremap(&pdev->dev, res->start, resource_size(res));
 	if (mem == NULL) {
 		dev_err(&pdev->dev, "ioremap failed\n");
 		return -ENOMEM;
@@ -114,6 +106,7 @@ static int ath_ahb_probe(struct platform_device *pdev)
 
 	irq = res->start;
 
+	ath9k_fill_chanctx_ops();
 	hw = ieee80211_alloc_hw(sizeof(struct ath_softc), &ath9k_ops);
 	if (hw == NULL) {
 		dev_err(&pdev->dev, "no memory for ieee80211_hw\n");
@@ -146,9 +139,6 @@ static int ath_ahb_probe(struct platform_device *pdev)
 	wiphy_info(hw->wiphy, "%s mem=0x%lx, irq=%d\n",
 		   hw_name, (unsigned long)mem, irq);
 
-	common = ath9k_hw_common(sc->sc_ah);
-	/* Will be cleared in ath9k_start() */
-	set_bit(ATH_OP_INVALID, &common->op_flags);
 	return 0;
 
  err_irq:
@@ -178,7 +168,6 @@ static struct platform_driver ath_ahb_driver = {
 	.remove     = ath_ahb_remove,
 	.driver		= {
 		.name	= "ath9k",
-		.owner	= THIS_MODULE,
 	},
 	.id_table    = ath9k_platform_id_table,
 };

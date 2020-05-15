@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * udbg for NS16550 compatible serial ports
  *
  * Copyright (C) 2001-2005 PPC 64 Team, IBM Corp
- *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
  */
 #include <linux/types.h>
 #include <asm/udbg.h>
@@ -69,8 +65,12 @@ static void udbg_uart_putc(char c)
 
 static int udbg_uart_getc_poll(void)
 {
-	if (!udbg_uart_in || !(udbg_uart_in(UART_LSR) & LSR_DR))
+	if (!udbg_uart_in)
+		return -1;
+
+	if (!(udbg_uart_in(UART_LSR) & LSR_DR))
 		return udbg_uart_in(UART_RBR);
+
 	return -1;
 }
 
@@ -296,14 +296,3 @@ void __init udbg_init_40x_realmode(void)
 }
 
 #endif /* CONFIG_PPC_EARLY_DEBUG_40x */
-
-
-#ifdef CONFIG_PPC_EARLY_DEBUG_WSP
-
-void __init udbg_init_wsp(void)
-{
-	udbg_uart_init_mmio((void *)WSP_UART_VIRT, 1);
-	udbg_uart_setup(57600, 50000000);
-}
-
-#endif /* CONFIG_PPC_EARLY_DEBUG_WSP */

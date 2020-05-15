@@ -1,25 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* -*- linux-c -*- *
  *
  * ALSA driver for the digigram lx6464es interface
  *
  * Copyright (c) 2008, 2009 Tim Blechmann <tim@klingt.org>
- *
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.  If not, write to
- * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
- *
  */
 
 #include <linux/module.h>
@@ -56,15 +40,23 @@ static const char card_name[] = "LX6464ES";
 
 #define PCI_DEVICE_ID_PLX_LX6464ES		PCI_DEVICE_ID_PLX_9056
 
-static DEFINE_PCI_DEVICE_TABLE(snd_lx6464es_ids) = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_LX6464ES),
-	  .subvendor = PCI_VENDOR_ID_DIGIGRAM,
-	  .subdevice = PCI_SUBDEVICE_ID_DIGIGRAM_LX6464ES_SERIAL_SUBSYSTEM
+static const struct pci_device_id snd_lx6464es_ids[] = {
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_LX6464ES,
+			 PCI_VENDOR_ID_DIGIGRAM,
+			 PCI_SUBDEVICE_ID_DIGIGRAM_LX6464ES_SERIAL_SUBSYSTEM),
 	},			/* LX6464ES */
-	{ PCI_DEVICE(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_LX6464ES),
-	  .subvendor = PCI_VENDOR_ID_DIGIGRAM,
-	  .subdevice = PCI_SUBDEVICE_ID_DIGIGRAM_LX6464ES_CAE_SERIAL_SUBSYSTEM
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_LX6464ES,
+			 PCI_VENDOR_ID_DIGIGRAM,
+			 PCI_SUBDEVICE_ID_DIGIGRAM_LX6464ES_CAE_SERIAL_SUBSYSTEM),
 	},			/* LX6464ES-CAE */
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_LX6464ES,
+			 PCI_VENDOR_ID_DIGIGRAM,
+			 PCI_SUBDEVICE_ID_DIGIGRAM_LX6464ESE_SERIAL_SUBSYSTEM),
+	},			/* LX6464ESe */
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_LX6464ES,
+			 PCI_VENDOR_ID_DIGIGRAM,
+			 PCI_SUBDEVICE_ID_DIGIGRAM_LX6464ESE_CAE_SERIAL_SUBSYSTEM),
+	},			/* LX6464ESe-CAE */
 	{ 0, },
 };
 
@@ -77,7 +69,7 @@ MODULE_DEVICE_TABLE(pci, snd_lx6464es_ids);
 
 
 /* alsa callbacks */
-static struct snd_pcm_hardware lx_caps = {
+static const struct snd_pcm_hardware lx_caps = {
 	.info             = (SNDRV_PCM_INFO_MMAP |
 			     SNDRV_PCM_INFO_INTERLEAVED |
 			     SNDRV_PCM_INFO_MMAP_VALID |
@@ -234,8 +226,8 @@ static int lx_pcm_open(struct snd_pcm_substream *substream)
 
 	/* the clock rate cannot be changed */
 	board_rate = chip->board_sample_rate;
-	err = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_RATE,
-					   board_rate, board_rate);
+	err = snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_RATE,
+					   board_rate);
 
 	if (err < 0) {
 		dev_warn(chip->card->dev, "could not constrain periods\n");
@@ -269,9 +261,8 @@ exit:
 
 static int lx_pcm_close(struct snd_pcm_substream *substream)
 {
-	int err = 0;
 	dev_dbg(substream->pcm->card->dev, "->lx_pcm_close\n");
-	return err;
+	return 0;
 }
 
 static snd_pcm_uframes_t lx_pcm_stream_pointer(struct snd_pcm_substream
@@ -279,7 +270,6 @@ static snd_pcm_uframes_t lx_pcm_stream_pointer(struct snd_pcm_substream
 {
 	struct lx6464es *chip = snd_pcm_substream_chip(substream);
 	snd_pcm_uframes_t pos;
-	unsigned long flags;
 	int is_capture = (substream->stream == SNDRV_PCM_STREAM_CAPTURE);
 
 	struct lx_stream *lx_stream = is_capture ? &chip->capture_stream :
@@ -287,9 +277,9 @@ static snd_pcm_uframes_t lx_pcm_stream_pointer(struct snd_pcm_substream
 
 	dev_dbg(chip->card->dev, "->lx_pcm_stream_pointer\n");
 
-	spin_lock_irqsave(&chip->lock, flags);
+	mutex_lock(&chip->lock);
 	pos = lx_stream->frame_pos * substream->runtime->period_size;
-	spin_unlock_irqrestore(&chip->lock, flags);
+	mutex_unlock(&chip->lock);
 
 	dev_dbg(chip->card->dev, "stream_pointer at %ld\n", pos);
 	return pos;
@@ -352,15 +342,10 @@ static int lx_pcm_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *hw_params, int is_capture)
 {
 	struct lx6464es *chip = snd_pcm_substream_chip(substream);
-	int err = 0;
 
 	dev_dbg(chip->card->dev, "->lx_pcm_hw_params\n");
 
 	mutex_lock(&chip->setup_mutex);
-
-	/* set dma buffer */
-	err = snd_pcm_lib_malloc_pages(substream,
-				       params_buffer_bytes(hw_params));
 
 	if (is_capture)
 		chip->capture_stream.stream = substream;
@@ -368,7 +353,7 @@ static int lx_pcm_hw_params(struct snd_pcm_substream *substream,
 		chip->playback_stream.stream = substream;
 
 	mutex_unlock(&chip->setup_mutex);
-	return err;
+	return 0;
 }
 
 static int lx_pcm_hw_params_playback(struct snd_pcm_substream *substream,
@@ -410,12 +395,10 @@ static int lx_pcm_hw_free(struct snd_pcm_substream *substream)
 		chip->hardware_running[is_capture] = 0;
 	}
 
-	err = snd_pcm_lib_free_pages(substream);
-
 	if (is_capture)
-		chip->capture_stream.stream = 0;
+		chip->capture_stream.stream = NULL;
 	else
-		chip->playback_stream.stream = 0;
+		chip->playback_stream.stream = NULL;
 
 exit:
 	mutex_unlock(&chip->setup_mutex);
@@ -485,8 +468,8 @@ static void lx_trigger_stop(struct lx6464es *chip, struct lx_stream *lx_stream)
 
 }
 
-static void lx_trigger_tasklet_dispatch_stream(struct lx6464es *chip,
-					       struct lx_stream *lx_stream)
+static void lx_trigger_dispatch_stream(struct lx6464es *chip,
+				       struct lx_stream *lx_stream)
 {
 	switch (lx_stream->status) {
 	case LX_STREAM_STATUS_SCHEDULE_RUN:
@@ -502,24 +485,12 @@ static void lx_trigger_tasklet_dispatch_stream(struct lx6464es *chip,
 	}
 }
 
-static void lx_trigger_tasklet(unsigned long data)
-{
-	struct lx6464es *chip = (struct lx6464es *)data;
-	unsigned long flags;
-
-	dev_dbg(chip->card->dev, "->lx_trigger_tasklet\n");
-
-	spin_lock_irqsave(&chip->lock, flags);
-	lx_trigger_tasklet_dispatch_stream(chip, &chip->capture_stream);
-	lx_trigger_tasklet_dispatch_stream(chip, &chip->playback_stream);
-	spin_unlock_irqrestore(&chip->lock, flags);
-}
-
 static int lx_pcm_trigger_dispatch(struct lx6464es *chip,
 				   struct lx_stream *lx_stream, int cmd)
 {
 	int err = 0;
 
+	mutex_lock(&chip->lock);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 		lx_stream->status = LX_STREAM_STATUS_SCHEDULE_RUN;
@@ -533,9 +504,12 @@ static int lx_pcm_trigger_dispatch(struct lx6464es *chip,
 		err = -EINVAL;
 		goto exit;
 	}
-	tasklet_schedule(&chip->trigger_tasklet);
+
+	lx_trigger_dispatch_stream(chip, &chip->capture_stream);
+	lx_trigger_dispatch_stream(chip, &chip->playback_stream);
 
 exit:
+	mutex_unlock(&chip->lock);
 	return err;
 }
 
@@ -814,10 +788,9 @@ mac_ready:
 	return err;
 }
 
-static struct snd_pcm_ops lx_ops_playback = {
+static const struct snd_pcm_ops lx_ops_playback = {
 	.open      = lx_pcm_open,
 	.close     = lx_pcm_close,
-	.ioctl     = snd_pcm_lib_ioctl,
 	.prepare   = lx_pcm_prepare,
 	.hw_params = lx_pcm_hw_params_playback,
 	.hw_free   = lx_pcm_hw_free,
@@ -825,10 +798,9 @@ static struct snd_pcm_ops lx_ops_playback = {
 	.pointer   = lx_pcm_stream_pointer,
 };
 
-static struct snd_pcm_ops lx_ops_capture = {
+static const struct snd_pcm_ops lx_ops_capture = {
 	.open      = lx_pcm_open,
 	.close     = lx_pcm_close,
-	.ioctl     = snd_pcm_lib_ioctl,
 	.prepare   = lx_pcm_prepare,
 	.hw_params = lx_pcm_hw_params_capture,
 	.hw_free   = lx_pcm_hw_free,
@@ -861,13 +833,11 @@ static int lx_pcm_create(struct lx6464es *chip)
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &lx_ops_capture);
 
 	pcm->info_flags = 0;
+	pcm->nonatomic = true;
 	strcpy(pcm->name, card_name);
 
-	err = snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
-						    snd_dma_pci_data(chip->pci),
-						    size, size);
-	if (err < 0)
-		return err;
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV,
+				       &chip->pci->dev, size, size);
 
 	chip->pcm = pcm;
 	chip->capture_stream.is_capture = 1;
@@ -908,7 +878,7 @@ static int lx_control_playback_put(struct snd_kcontrol *kcontrol,
 	return changed;
 }
 
-static struct snd_kcontrol_new lx_control_playback_switch = {
+static const struct snd_kcontrol_new lx_control_playback_switch = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "PCM Playback Switch",
 	.index = 0,
@@ -957,13 +927,7 @@ static void lx_proc_levels_read(struct snd_info_entry *entry,
 
 static int lx_proc_create(struct snd_card *card, struct lx6464es *chip)
 {
-	struct snd_info_entry *entry;
-	int err = snd_card_proc_new(card, "levels", &entry);
-	if (err < 0)
-		return err;
-
-	snd_info_set_text_ops(entry, chip, lx_proc_levels_read);
-	return 0;
+	return snd_card_ro_proc_new(card, "levels", chip, lx_proc_levels_read);
 }
 
 
@@ -974,7 +938,7 @@ static int snd_lx6464es_create(struct snd_card *card,
 	struct lx6464es *chip;
 	int err;
 
-	static struct snd_device_ops ops = {
+	static const struct snd_device_ops ops = {
 		.dev_free = snd_lx6464es_dev_free,
 	};
 
@@ -990,7 +954,7 @@ static int snd_lx6464es_create(struct snd_card *card,
 	pci_set_master(pci);
 
 	/* check if we can restrict PCI DMA transfers to 32 bits */
-	err = pci_set_dma_mask(pci, DMA_BIT_MASK(32));
+	err = dma_set_mask(&pci->dev, DMA_BIT_MASK(32));
 	if (err < 0) {
 		dev_err(card->dev,
 			"architecture does not support 32bit PCI busmaster DMA\n");
@@ -1009,15 +973,9 @@ static int snd_lx6464es_create(struct snd_card *card,
 	chip->irq = -1;
 
 	/* initialize synchronization structs */
-	spin_lock_init(&chip->lock);
-	spin_lock_init(&chip->msg_lock);
+	mutex_init(&chip->lock);
+	mutex_init(&chip->msg_lock);
 	mutex_init(&chip->setup_mutex);
-	tasklet_init(&chip->trigger_tasklet, lx_trigger_tasklet,
-		     (unsigned long)chip);
-	tasklet_init(&chip->tasklet_capture, lx_tasklet_capture,
-		     (unsigned long)chip);
-	tasklet_init(&chip->tasklet_playback, lx_tasklet_playback,
-		     (unsigned long)chip);
 
 	/* request resources */
 	err = pci_request_regions(pci, card_name);
@@ -1031,14 +989,20 @@ static int snd_lx6464es_create(struct snd_card *card,
 
 	/* dsp port */
 	chip->port_dsp_bar = pci_ioremap_bar(pci, 2);
+	if (!chip->port_dsp_bar) {
+		dev_err(card->dev, "cannot remap PCI memory region\n");
+		err = -ENOMEM;
+		goto remap_pci_failed;
+	}
 
-	err = request_irq(pci->irq, lx_interrupt, IRQF_SHARED,
-			  KBUILD_MODNAME, chip);
+	err = request_threaded_irq(pci->irq, lx_interrupt, lx_threaded_irq,
+				   IRQF_SHARED, KBUILD_MODNAME, chip);
 	if (err) {
 		dev_err(card->dev, "unable to grab IRQ %d\n", pci->irq);
 		goto request_irq_failed;
 	}
 	chip->irq = pci->irq;
+	card->sync_irq = chip->irq;
 
 	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);
 	if (err < 0)
@@ -1070,6 +1034,9 @@ device_new_failed:
 	free_irq(pci->irq, chip);
 
 request_irq_failed:
+	iounmap(chip->port_dsp_bar);
+
+remap_pci_failed:
 	pci_release_regions(pci);
 
 request_regions_failed:

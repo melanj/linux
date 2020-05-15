@@ -26,6 +26,7 @@
 #include <linux/mutex.h>
 #include <linux/aer.h>
 #include <linux/bsg-lib.h>
+#include <linux/vmalloc.h>
 
 #include <net/tcp.h>
 #include <scsi/scsi.h>
@@ -166,6 +167,8 @@
 
 #define DEV_DB_NON_PERSISTENT	0
 #define DEV_DB_PERSISTENT	1
+
+#define QL4_ISP_REG_DISCONNECT 0xffffffffU
 
 #define COPY_ISID(dst_isid, src_isid) {			\
 	int i, j;					\
@@ -407,19 +410,7 @@ struct qla4_8xxx_legacy_intr_set {
 };
 
 /* MSI-X Support */
-
-#define QLA_MSIX_DEFAULT	0x00
-#define QLA_MSIX_RSP_Q		0x01
-
 #define QLA_MSIX_ENTRIES	2
-#define QLA_MIDX_DEFAULT	0
-#define QLA_MIDX_RSP_Q		1
-
-struct ql4_msix_entry {
-	int have_irq;
-	uint16_t msix_vector;
-	uint16_t msix_entry;
-};
 
 /*
  * ISP Operations
@@ -571,9 +562,6 @@ struct scsi_qla_host {
 #define AF_IRQ_ATTACHED			10 /* 0x00000400 */
 #define AF_DISABLE_ACB_COMPLETE		11 /* 0x00000800 */
 #define AF_HA_REMOVAL			12 /* 0x00001000 */
-#define AF_INTx_ENABLED			15 /* 0x00008000 */
-#define AF_MSI_ENABLED			16 /* 0x00010000 */
-#define AF_MSIX_ENABLED			17 /* 0x00020000 */
 #define AF_MBOX_COMMAND_NOPOLL		18 /* 0x00040000 */
 #define AF_FW_RECOVERY			19 /* 0x00080000 */
 #define AF_EEH_BUSY			20 /* 0x00100000 */
@@ -601,6 +589,7 @@ struct scsi_qla_host {
 #define DPC_HA_NEED_QUIESCENT		22 /* 0x00400000 ISP-82xx only*/
 #define DPC_POST_IDC_ACK		23 /* 0x00800000 */
 #define DPC_RESTORE_ACB			24 /* 0x01000000 */
+#define DPC_SYSFS_DDB_EXPORT		25 /* 0x02000000 */
 
 	struct Scsi_Host *host; /* pointer to host data */
 	uint32_t tot_ddbs;
@@ -759,8 +748,6 @@ struct scsi_qla_host {
 
 	struct isp_operations *isp_ops;
 	struct ql82xx_hw_data hw;
-
-	struct ql4_msix_entry msix_entries[QLA_MSIX_ENTRIES];
 
 	uint32_t nx_dev_init_timeout;
 	uint32_t nx_reset_timeout;

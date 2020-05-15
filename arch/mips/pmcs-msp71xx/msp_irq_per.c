@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2010 PMC-Sierra, Inc, derived from irq_cpu.c
  *
  * This file define the irq handler for MSP PER subsystem interrupts.
- *
- * This program is free software; you can redistribute	it and/or modify it
- * under  the terms of	the GNU General	 Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/init.h>
@@ -113,9 +109,6 @@ void __init msp_per_irq_init(void)
 	/* initialize all the IRQ descriptors */
 	for (i = MSP_PER_INTBASE; i < MSP_PER_INTBASE + 32; i++) {
 		irq_set_chip(i, &msp_per_irq_controller);
-#ifdef CONFIG_MIPS_MT_SMTC
-		irq_hwmask[i] = C_IRQ4;
-#endif
 	}
 }
 

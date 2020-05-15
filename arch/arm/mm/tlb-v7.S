@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/mm/tlb-v7.S
  *
  *  Copyright (C) 1997-2002 Russell King
  *  Modified for ARMv7 by Catalin Marinas
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  ARM architecture version 6 TLB handling functions.
  *  These assume a split I/D TLB.
@@ -57,7 +54,7 @@ ENTRY(v7wbi_flush_user_tlb_range)
 	cmp	r0, r1
 	blo	1b
 	dsb	ish
-	mov	pc, lr
+	ret	lr
 ENDPROC(v7wbi_flush_user_tlb_range)
 
 /*
@@ -86,7 +83,7 @@ ENTRY(v7wbi_flush_kern_tlb_range)
 	blo	1b
 	dsb	ish
 	isb
-	mov	pc, lr
+	ret	lr
 ENDPROC(v7wbi_flush_kern_tlb_range)
 
 	__INIT

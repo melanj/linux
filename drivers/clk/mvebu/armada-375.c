@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Marvell Armada 375 SoC clocks
  *
@@ -7,9 +8,6 @@
  * Sebastian Hesselbarth <sebastian.hesselbarth@gmail.com>
  * Andrew Lunn <andrew@lunn.ch>
  *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/kernel.h>
@@ -27,14 +25,14 @@
  * all modified at the same time, and not separately as for the Armada
  * 370 or the Armada XP SoCs.
  *
- * SAR0[21:17]   : CPU frequency    DDR frequency   L2 frequency
+ * SAR1[21:17]   : CPU frequency    DDR frequency   L2 frequency
  *		 6   =  400 MHz	    400 MHz	    200 MHz
  *		 15  =  600 MHz	    600 MHz	    300 MHz
  *		 21  =  800 MHz	    534 MHz	    400 MHz
  *		 25  = 1000 MHz	    500 MHz	    500 MHz
  *		 others reserved.
  *
- * SAR0[22]   : TCLK frequency
+ * SAR1[22]   : TCLK frequency
  *		 0 = 166 MHz
  *		 1 = 200 MHz
  */

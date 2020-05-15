@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* 10G controller driver for Samsung SoCs
  *
  * Copyright (C) 2013 Samsung Electronics Co., Ltd.
  *		http://www.samsung.com
  *
  * Author: Siva Reddy Kallam <siva.kallam@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #ifndef __SXGBE_REGMAP_H__
 #define __SXGBE_REGMAP_H__
@@ -51,6 +48,10 @@
 #define SXGBE_CORE_RX_CTL1_REG		0x00A4
 #define SXGBE_CORE_RX_CTL2_REG		0x00A8
 #define SXGBE_CORE_RX_CTL3_REG		0x00AC
+
+#define SXGBE_CORE_RXQ_ENABLE_MASK	0x0003
+#define SXGBE_CORE_RXQ_ENABLE		0x0002
+#define SXGBE_CORE_RXQ_DISABLE		0x0000
 
 /* Interrupt Registers */
 #define SXGBE_CORE_INT_STATUS_REG	0x00B0
@@ -183,7 +184,6 @@
 #define SXGBE_MMC_RXWATCHDOG_ERR_REG		0x09A0
 
 /* L3/L4 function registers */
-#define SXGBE_CORE_L34_ADDCTL_REG	0x0C00
 #define SXGBE_CORE_L34_ADDCTL_REG	0x0C00
 #define SXGBE_CORE_L34_DATA_REG		0x0C04
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/f2fs/hash.c
  *
@@ -7,16 +8,13 @@
  * Portions of this code from linux/fs/ext3/hash.c
  *
  * Copyright (C) 2002 by Theodore Ts'o
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/f2fs_fs.h>
 #include <linux/cryptohash.h>
 #include <linux/pagemap.h>
+#include <linux/unicode.h>
 
 #include "f2fs.h"
 
@@ -42,7 +40,8 @@ static void TEA_transform(unsigned int buf[4], unsigned int const in[])
 	buf[1] += b1;
 }
 
-static void str2hashbuf(const char *msg, size_t len, unsigned int *buf, int num)
+static void str2hashbuf(const unsigned char *msg, size_t len,
+				unsigned int *buf, int num)
 {
 	unsigned pad, val;
 	int i;
@@ -69,15 +68,21 @@ static void str2hashbuf(const char *msg, size_t len, unsigned int *buf, int num)
 		*buf++ = pad;
 }
 
-f2fs_hash_t f2fs_dentry_hash(const char *name, size_t len)
+static f2fs_hash_t __f2fs_dentry_hash(const struct qstr *name_info,
+				struct fscrypt_name *fname)
 {
 	__u32 hash;
 	f2fs_hash_t f2fs_hash;
-	const char *p;
+	const unsigned char *p;
 	__u32 in[8], buf[4];
+	const unsigned char *name = name_info->name;
+	size_t len = name_info->len;
 
-	if ((len <= 2) && (name[0] == '.') &&
-		(name[1] == '.' || name[1] == '\0'))
+	/* encrypted bigname case */
+	if (fname && !fname->disk_name.name)
+		return cpu_to_le32(fname->hash);
+
+	if (is_dot_dotdot(name_info))
 		return 0;
 
 	/* Initialize the default seed for the hash checksum functions */
@@ -98,4 +103,38 @@ f2fs_hash_t f2fs_dentry_hash(const char *name, size_t len)
 	hash = buf[0];
 	f2fs_hash = cpu_to_le32(hash & ~F2FS_HASH_COL_BIT);
 	return f2fs_hash;
+}
+
+f2fs_hash_t f2fs_dentry_hash(const struct inode *dir,
+		const struct qstr *name_info, struct fscrypt_name *fname)
+{
+#ifdef CONFIG_UNICODE
+	struct f2fs_sb_info *sbi = F2FS_SB(dir->i_sb);
+	const struct unicode_map *um = sbi->s_encoding;
+	int r, dlen;
+	unsigned char *buff;
+	struct qstr folded;
+
+	if (!name_info->len || !IS_CASEFOLDED(dir))
+		goto opaque_seq;
+
+	buff = f2fs_kzalloc(sbi, sizeof(char) * PATH_MAX, GFP_KERNEL);
+	if (!buff)
+		return -ENOMEM;
+
+	dlen = utf8_casefold(um, name_info, buff, PATH_MAX);
+	if (dlen < 0) {
+		kvfree(buff);
+		goto opaque_seq;
+	}
+	folded.name = buff;
+	folded.len = dlen;
+	r = __f2fs_dentry_hash(&folded, fname);
+
+	kvfree(buff);
+	return r;
+
+opaque_seq:
+#endif
+	return __f2fs_dentry_hash(name_info, fname);
 }

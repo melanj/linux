@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2013 Samsung Electronics Co., Ltd.
  * Author: Beomho Seo <beomho.seo@samsung.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General Public License version 2, as published
- * by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
@@ -268,7 +265,7 @@ static irqreturn_t cm36651_irq_handler(int irq, void *data)
 				CM36651_CMD_READ_RAW_PROXIMITY,
 				IIO_EV_TYPE_THRESH, ev_dir);
 
-	iio_push_event(indio_dev, ev_code, iio_get_time_ns());
+	iio_push_event(indio_dev, ev_code, iio_get_time_ns(indio_dev));
 
 	return IRQ_HANDLED;
 }
@@ -535,7 +532,7 @@ static int cm36651_write_prox_event_config(struct iio_dev *indio_dev,
 					int state)
 {
 	struct cm36651_data *cm36651 = iio_priv(indio_dev);
-	int cmd, ret = -EINVAL;
+	int cmd, ret;
 
 	mutex_lock(&cm36651->lock);
 
@@ -612,7 +609,6 @@ static const struct attribute_group cm36651_attribute_group = {
 };
 
 static const struct iio_info cm36651_info = {
-	.driver_module		= THIS_MODULE,
 	.read_raw		= &cm36651_read_raw,
 	.write_raw		= &cm36651_write_raw,
 	.read_event_value	= &cm36651_read_prox_thresh,
@@ -650,9 +646,21 @@ static int cm36651_probe(struct i2c_client *client,
 	i2c_set_clientdata(client, indio_dev);
 
 	cm36651->client = client;
-	cm36651->ps_client = i2c_new_dummy(client->adapter,
+	cm36651->ps_client = i2c_new_dummy_device(client->adapter,
 						     CM36651_I2C_ADDR_PS);
-	cm36651->ara_client = i2c_new_dummy(client->adapter, CM36651_ARA);
+	if (IS_ERR(cm36651->ps_client)) {
+		dev_err(&client->dev, "%s: new i2c device failed\n", __func__);
+		ret = PTR_ERR(cm36651->ps_client);
+		goto error_disable_reg;
+	}
+
+	cm36651->ara_client = i2c_new_dummy_device(client->adapter, CM36651_ARA);
+	if (IS_ERR(cm36651->ara_client)) {
+		dev_err(&client->dev, "%s: new i2c device failed\n", __func__);
+		ret = PTR_ERR(cm36651->ara_client);
+		goto error_i2c_unregister_ps;
+	}
+
 	mutex_init(&cm36651->lock);
 	indio_dev->dev.parent = &client->dev;
 	indio_dev->channels = cm36651_channels;
@@ -664,7 +672,7 @@ static int cm36651_probe(struct i2c_client *client,
 	ret = cm36651_setup_reg(cm36651);
 	if (ret) {
 		dev_err(&client->dev, "%s: register setup failed\n", __func__);
-		goto error_disable_reg;
+		goto error_i2c_unregister_ara;
 	}
 
 	ret = request_threaded_irq(client->irq, NULL, cm36651_irq_handler,
@@ -672,7 +680,7 @@ static int cm36651_probe(struct i2c_client *client,
 							"cm36651", indio_dev);
 	if (ret) {
 		dev_err(&client->dev, "%s: request irq failed\n", __func__);
-		goto error_disable_reg;
+		goto error_i2c_unregister_ara;
 	}
 
 	ret = iio_device_register(indio_dev);
@@ -685,6 +693,10 @@ static int cm36651_probe(struct i2c_client *client,
 
 error_free_irq:
 	free_irq(client->irq, indio_dev);
+error_i2c_unregister_ara:
+	i2c_unregister_device(cm36651->ara_client);
+error_i2c_unregister_ps:
+	i2c_unregister_device(cm36651->ps_client);
 error_disable_reg:
 	regulator_disable(cm36651->vled_reg);
 	return ret;
@@ -698,6 +710,8 @@ static int cm36651_remove(struct i2c_client *client)
 	iio_device_unregister(indio_dev);
 	regulator_disable(cm36651->vled_reg);
 	free_irq(client->irq, indio_dev);
+	i2c_unregister_device(cm36651->ps_client);
+	i2c_unregister_device(cm36651->ara_client);
 
 	return 0;
 }
@@ -713,12 +727,12 @@ static const struct of_device_id cm36651_of_match[] = {
 	{ .compatible = "capella,cm36651" },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, cm36651_of_match);
 
 static struct i2c_driver cm36651_driver = {
 	.driver = {
 		.name	= "cm36651",
 		.of_match_table = cm36651_of_match,
-		.owner	= THIS_MODULE,
 	},
 	.probe		= cm36651_probe,
 	.remove		= cm36651_remove,

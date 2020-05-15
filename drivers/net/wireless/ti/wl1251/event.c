@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1251
  *
  * Copyright (c) 1998-2007 Texas Instruments Incorporated
  * Copyright (C) 2008 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include "wl1251.h"
@@ -36,7 +22,11 @@ static int wl1251_event_scan_complete(struct wl1251 *wl,
 		     mbox->scheduled_scan_channels);
 
 	if (wl->scanning) {
-		ieee80211_scan_completed(wl->hw, false);
+		struct cfg80211_scan_info info = {
+			.aborted = false,
+		};
+
+		ieee80211_scan_completed(wl->hw, &info);
 		wl1251_debug(DEBUG_MAC80211, "mac80211 hw scan completed");
 		wl->scanning = false;
 		if (wl->hw->conf.flags & IEEE80211_CONF_IDLE)
@@ -124,11 +114,12 @@ static int wl1251_event_process(struct wl1251 *wl, struct event_mailbox *mbox)
 			return ret;
 	}
 
-	if (wl->vif && vector & SYNCHRONIZATION_TIMEOUT_EVENT_ID) {
+	if (vector & SYNCHRONIZATION_TIMEOUT_EVENT_ID) {
 		wl1251_debug(DEBUG_EVENT, "SYNCHRONIZATION_TIMEOUT_EVENT");
 
 		/* indicate to the stack, that beacons have been lost */
-		ieee80211_beacon_loss(wl->vif);
+		if (wl->vif && wl->vif->type == NL80211_IFTYPE_STATION)
+			ieee80211_beacon_loss(wl->vif);
 	}
 
 	if (vector & REGAINED_BSS_EVENT_ID) {
@@ -145,7 +136,7 @@ static int wl1251_event_process(struct wl1251 *wl, struct event_mailbox *mbox)
 				     "ROAMING_TRIGGER_LOW_RSSI_EVENT");
 			ieee80211_cqm_rssi_notify(wl->vif,
 				NL80211_CQM_RSSI_THRESHOLD_EVENT_LOW,
-				GFP_KERNEL);
+				0, GFP_KERNEL);
 		}
 
 		if (vector & ROAMING_TRIGGER_REGAINED_RSSI_EVENT_ID) {
@@ -153,7 +144,7 @@ static int wl1251_event_process(struct wl1251 *wl, struct event_mailbox *mbox)
 				     "ROAMING_TRIGGER_REGAINED_RSSI_EVENT");
 			ieee80211_cqm_rssi_notify(wl->vif,
 				NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH,
-				GFP_KERNEL);
+				0, GFP_KERNEL);
 		}
 	}
 

@@ -1,17 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *
+ * Copyright (c) 2013-2016, Intel Corporation. All rights reserved.
  * Intel Management Engine Interface (Intel MEI) Linux driver
- * Copyright (c) 2013-2014, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
  */
 
 #ifndef _MEI_HW_TXE_H_
@@ -21,6 +11,8 @@
 
 #include "hw.h"
 #include "hw-txe-regs.h"
+
+#define MEI_TXI_RPM_TIMEOUT    500 /* ms */
 
 /* Flatten Hierarchy interrupt cause */
 #define TXE_INTR_READINESS_BIT  0 /* HISR_INT_0_STS */
@@ -35,21 +27,20 @@
 /**
  * struct mei_txe_hw - txe hardware specifics
  *
- * @mem_addr:        SeC and BRIDGE bars
- * @aliveness:       aliveness (power gating) state of the hardware
- * @readiness:       readiness state of the hardware
- * @wait_aliveness:  aliveness wait queue
- * @recvd_aliveness: aliveness interrupt was recived
- * @intr_cause:      translated interrupt cause
+ * @mem_addr:            SeC and BRIDGE bars
+ * @aliveness:           aliveness (power gating) state of the hardware
+ * @readiness:           readiness state of the hardware
+ * @slots:               number of empty slots
+ * @wait_aliveness_resp: aliveness wait queue
+ * @intr_cause:          translated interrupt cause
  */
 struct mei_txe_hw {
-	void __iomem *mem_addr[NUM_OF_MEM_BARS];
+	void __iomem * const *mem_addr;
 	u32 aliveness;
 	u32 readiness;
 	u32 slots;
 
-	wait_queue_head_t wait_aliveness;
-	bool recvd_aliveness;
+	wait_queue_head_t wait_aliveness_resp;
 
 	unsigned long intr_cause;
 };

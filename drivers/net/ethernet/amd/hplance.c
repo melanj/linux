@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* hplance.c  : the  Linux/hp300/lance ethernet driver
  *
  * Copyright (C) 05/1998 Peter Maydell <pmaydell@chiark.greenend.org.uk>
@@ -27,9 +28,9 @@
 
 #include "hplance.h"
 
-/* We have 16834 bytes of RAM for the init block and buffers. This places
+/* We have 16392 bytes of RAM for the init block and buffers. This places
  * an upper limit on the number of buffers we can use. NetBSD uses 8 Rx
- * buffers and 2 Tx buffers.
+ * buffers and 2 Tx buffers, it takes (8 + 2) * 1544 bytes.
  */
 #define LANCE_LOG_TX_BUFFERS 1
 #define LANCE_LOG_RX_BUFFERS 3
@@ -72,7 +73,6 @@ static const struct net_device_ops hplance_netdev_ops = {
 	.ndo_stop		= hplance_close,
 	.ndo_start_xmit		= lance_start_xmit,
 	.ndo_set_rx_mode	= lance_set_multicast,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 #ifdef CONFIG_NET_POLL_CONTROLLER

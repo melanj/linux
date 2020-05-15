@@ -1,25 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright 2011-2012 Calxeda, Inc.
  *  Copyright (C) 2012-2013 Altera Corporation <www.altera.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  * Based from clk-highbank.c
- *
  */
-#include <linux/clk.h>
-#include <linux/clkdev.h>
+#include <linux/slab.h>
 #include <linux/clk-provider.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 
 #include "clk.h"
 
@@ -42,6 +32,8 @@
 #define CLK_MGR_PLL_CLK_SRC_MASK	0x3
 
 #define to_socfpga_clk(p) container_of(p, struct socfpga_pll, hw.hw)
+
+void __iomem *clk_mgr_base_addr;
 
 static unsigned long clk_pll_recalc_rate(struct clk_hw *hwclk,
 					 unsigned long parent_rate)
@@ -87,8 +79,8 @@ static __init struct clk *__socfpga_pll_init(struct device_node *node,
 	const char *clk_name = node->name;
 	const char *parent_name[SOCFPGA_MAX_PARENTS];
 	struct clk_init_data init;
+	struct device_node *clkmgr_np;
 	int rc;
-	int i = 0;
 
 	of_property_read_u32(node, "reg", &reg);
 
@@ -96,6 +88,10 @@ static __init struct clk *__socfpga_pll_init(struct device_node *node,
 	if (WARN_ON(!pll_clk))
 		return NULL;
 
+	clkmgr_np = of_find_compatible_node(NULL, NULL, "altr,clk-mgr");
+	clk_mgr_base_addr = of_iomap(clkmgr_np, 0);
+	of_node_put(clkmgr_np);
+	BUG_ON(!clk_mgr_base_addr);
 	pll_clk->hw.reg = clk_mgr_base_addr + reg;
 
 	of_property_read_string(node, "clock-output-names", &clk_name);
@@ -104,11 +100,7 @@ static __init struct clk *__socfpga_pll_init(struct device_node *node,
 	init.ops = ops;
 	init.flags = 0;
 
-	while (i < SOCFPGA_MAX_PARENTS && (parent_name[i] =
-			of_clk_get_parent_name(node, i)) != NULL)
-		i++;
-
-	init.num_parents = i;
+	init.num_parents = of_clk_parent_fill(node, parent_name, SOCFPGA_MAX_PARENTS);
 	init.parent_names = parent_name;
 	pll_clk->hw.hw.init = &init;
 

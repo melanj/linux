@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * xor offload engine api
  *
@@ -8,20 +9,6 @@
  *      with architecture considerations by:
  *      Neil Brown <neilb@suse.de>
  *      Jeff Garzik <jeff@garzik.org>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
@@ -78,8 +65,6 @@ do_async_xor(struct dma_chan *chan, struct dmaengine_unmap_data *unmap,
 		tx = dma->device_prep_dma_xor(chan, dma_dest, src_list,
 					      xor_src_cnt, unmap->len,
 					      dma_flags);
-		src_list[0] = tmp;
-
 
 		if (unlikely(!tx))
 			async_tx_quiesce(&submit->depend_tx);
@@ -92,6 +77,7 @@ do_async_xor(struct dma_chan *chan, struct dmaengine_unmap_data *unmap,
 						      xor_src_cnt, unmap->len,
 						      dma_flags);
 		}
+		src_list[0] = tmp;
 
 		dma_set_unmap(tx, unmap);
 		async_tx_submit(chan, tx, submit);
@@ -183,7 +169,7 @@ async_xor(struct page *dest, struct page **src_list, unsigned int offset,
 	BUG_ON(src_cnt <= 1);
 
 	if (device)
-		unmap = dmaengine_get_unmap_data(device->dev, src_cnt+1, GFP_NOIO);
+		unmap = dmaengine_get_unmap_data(device->dev, src_cnt+1, GFP_NOWAIT);
 
 	if (unmap && is_dma_xor_aligned(device, offset, 0, len)) {
 		struct dma_async_tx_descriptor *tx;
@@ -279,7 +265,7 @@ async_xor_val(struct page *dest, struct page **src_list, unsigned int offset,
 	BUG_ON(src_cnt <= 1);
 
 	if (device)
-		unmap = dmaengine_get_unmap_data(device->dev, src_cnt, GFP_NOIO);
+		unmap = dmaengine_get_unmap_data(device->dev, src_cnt, GFP_NOWAIT);
 
 	if (unmap && src_cnt <= device->max_xor &&
 	    is_dma_xor_aligned(device, offset, 0, len)) {

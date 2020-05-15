@@ -1,26 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * pcmad.c
  * Hardware driver for Winsystems PCM-A/D12 and PCM-A/D16
  *
  * COMEDI - Linux Control and Measurement Device Interface
  * Copyright (C) 2000,2001 David A. Schleef <ds@schleef.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 /*
  * Driver: pcmad
  * Description: Winsystems PCM-A/D12, PCM-A/D16
- * Devices: (Winsystems) PCM-A/D12 [pcmad12]
- *	    (Winsystems) PCM-A/D16 [pcmad16]
+ * Devices: [Winsystems] PCM-A/D12 (pcmad12), PCM-A/D16 (pcmad16)
  * Author: ds
  * Status: untested
  *
@@ -112,7 +102,7 @@ static int pcmad_ai_insn_read(struct comedi_device *dev,
 
 static int pcmad_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 {
-	const struct pcmad_board_struct *board = comedi_board(dev);
+	const struct pcmad_board_struct *board = dev->board_ptr;
 	struct comedi_subdevice *s;
 	int ret;
 

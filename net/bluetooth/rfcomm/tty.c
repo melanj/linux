@@ -70,7 +70,7 @@ struct rfcomm_dev {
 };
 
 static LIST_HEAD(rfcomm_dev_list);
-static DEFINE_SPINLOCK(rfcomm_dev_lock);
+static DEFINE_MUTEX(rfcomm_dev_lock);
 
 static void rfcomm_dev_data_ready(struct rfcomm_dlc *dlc, struct sk_buff *skb);
 static void rfcomm_dev_state_change(struct rfcomm_dlc *dlc, int err);
@@ -96,9 +96,9 @@ static void rfcomm_dev_destruct(struct tty_port *port)
 	if (dev->tty_dev)
 		tty_unregister_device(rfcomm_tty_driver, dev->id);
 
-	spin_lock(&rfcomm_dev_lock);
+	mutex_lock(&rfcomm_dev_lock);
 	list_del(&dev->list);
-	spin_unlock(&rfcomm_dev_lock);
+	mutex_unlock(&rfcomm_dev_lock);
 
 	kfree(dev);
 
@@ -161,14 +161,14 @@ static struct rfcomm_dev *rfcomm_dev_get(int id)
 {
 	struct rfcomm_dev *dev;
 
-	spin_lock(&rfcomm_dev_lock);
+	mutex_lock(&rfcomm_dev_lock);
 
 	dev = __rfcomm_dev_lookup(id);
 
 	if (dev && !tty_port_get(&dev->port))
 		dev = NULL;
 
-	spin_unlock(&rfcomm_dev_lock);
+	mutex_unlock(&rfcomm_dev_lock);
 
 	return dev;
 }
@@ -178,7 +178,7 @@ static void rfcomm_reparent_device(struct rfcomm_dev *dev)
 	struct hci_dev *hdev;
 	struct hci_conn *conn;
 
-	hdev = hci_get_route(&dev->dst, &dev->src);
+	hdev = hci_get_route(&dev->dst, &dev->src, BDADDR_BREDR);
 	if (!hdev)
 		return;
 
@@ -210,8 +210,8 @@ static ssize_t show_channel(struct device *tty_dev, struct device_attribute *att
 	return sprintf(buf, "%d\n", dev->channel);
 }
 
-static DEVICE_ATTR(address, S_IRUGO, show_address, NULL);
-static DEVICE_ATTR(channel, S_IRUGO, show_channel, NULL);
+static DEVICE_ATTR(address, 0444, show_address, NULL);
+static DEVICE_ATTR(channel, 0444, show_channel, NULL);
 
 static struct rfcomm_dev *__rfcomm_dev_add(struct rfcomm_dev_req *req,
 					   struct rfcomm_dlc *dlc)
@@ -224,7 +224,7 @@ static struct rfcomm_dev *__rfcomm_dev_add(struct rfcomm_dev_req *req,
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	spin_lock(&rfcomm_dev_lock);
+	mutex_lock(&rfcomm_dev_lock);
 
 	if (req->dev_id < 0) {
 		dev->id = 0;
@@ -305,11 +305,11 @@ static struct rfcomm_dev *__rfcomm_dev_add(struct rfcomm_dev_req *req,
 	   holds reference to this module. */
 	__module_get(THIS_MODULE);
 
-	spin_unlock(&rfcomm_dev_lock);
+	mutex_unlock(&rfcomm_dev_lock);
 	return dev;
 
 out:
-	spin_unlock(&rfcomm_dev_lock);
+	mutex_unlock(&rfcomm_dev_lock);
 	kfree(dev);
 	return ERR_PTR(err);
 }
@@ -413,10 +413,8 @@ static int __rfcomm_create_dev(struct sock *sk, void __user *arg)
 		dlc = rfcomm_dlc_exists(&req.src, &req.dst, req.channel);
 		if (IS_ERR(dlc))
 			return PTR_ERR(dlc);
-		else if (dlc) {
-			rfcomm_dlc_put(dlc);
+		if (dlc)
 			return -EBUSY;
-		}
 		dlc = rfcomm_dlc_alloc(GFP_KERNEL);
 		if (!dlc)
 			return -ENOMEM;
@@ -524,7 +522,7 @@ static int rfcomm_get_dev_list(void __user *arg)
 
 	di = dl->dev_info;
 
-	spin_lock(&rfcomm_dev_lock);
+	mutex_lock(&rfcomm_dev_lock);
 
 	list_for_each_entry(dev, &rfcomm_dev_list, list) {
 		if (!tty_port_get(&dev->port))
@@ -540,7 +538,7 @@ static int rfcomm_get_dev_list(void __user *arg)
 			break;
 	}
 
-	spin_unlock(&rfcomm_dev_lock);
+	mutex_unlock(&rfcomm_dev_lock);
 
 	dl->dev_num = n;
 	size = sizeof(*dl) + n * sizeof(*di);
@@ -798,7 +796,7 @@ static int rfcomm_tty_write(struct tty_struct *tty, const unsigned char *buf, in
 
 		skb_reserve(skb, RFCOMM_SKB_HEAD_RESERVE);
 
-		memcpy(skb_put(skb, size), buf + sent, size);
+		skb_put_data(skb, buf + sent, size);
 
 		rfcomm_dlc_send_noerror(dlc, skb);
 
@@ -838,18 +836,6 @@ static int rfcomm_tty_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned l
 	case TIOCMIWAIT:
 		BT_DBG("TIOCMIWAIT");
 		break;
-
-	case TIOCGSERIAL:
-		BT_ERR("TIOCGSERIAL is not supported");
-		return -ENOIOCTLCMD;
-
-	case TIOCSSERIAL:
-		BT_ERR("TIOCSSERIAL is not supported");
-		return -ENOIOCTLCMD;
-
-	case TIOCSERGSTRUCT:
-		BT_ERR("TIOCSERGSTRUCT is not supported");
-		return -ENOIOCTLCMD;
 
 	case TIOCSERGETLSR:
 		BT_ERR("TIOCSERGETLSR is not supported");

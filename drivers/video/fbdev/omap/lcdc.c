@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OMAP1 internal LCD controller
  *
  * Copyright (C) 2004 Nokia Corporation
  * Author: Imre Deak <imre.deak@nokia.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 #include <linux/module.h>
 #include <linux/device.h>
@@ -74,18 +61,17 @@ static struct omap_lcd_controller {
 	void			(*dma_callback)(void *data);
 	void			*dma_callback_data;
 
-	int			fbmem_allocated;
 	dma_addr_t		vram_phys;
 	void			*vram_virt;
 	unsigned long		vram_size;
 } lcdc;
 
-static void inline enable_irqs(int mask)
+static inline void enable_irqs(int mask)
 {
 	lcdc.irq_mask |= mask;
 }
 
-static void inline disable_irqs(int mask)
+static inline void disable_irqs(int mask)
 {
 	lcdc.irq_mask &= ~mask;
 }
@@ -467,7 +453,7 @@ static void calc_ck_div(int is_tft, int pck, int *pck_div)
 	}
 }
 
-static void inline setup_regs(void)
+static inline void setup_regs(void)
 {
 	u32 l;
 	struct lcd_panel *panel = lcdc.fbdev->panel;
@@ -611,46 +597,10 @@ static void lcdc_dma_handler(u16 status, void *data)
 		lcdc.dma_callback(lcdc.dma_callback_data);
 }
 
-static int mmap_kern(void)
-{
-	struct vm_struct	*kvma;
-	struct vm_area_struct	vma;
-	pgprot_t		pgprot;
-	unsigned long		vaddr;
-
-	kvma = get_vm_area(lcdc.vram_size, VM_IOREMAP);
-	if (kvma == NULL) {
-		dev_err(lcdc.fbdev->dev, "can't get kernel vm area\n");
-		return -ENOMEM;
-	}
-	vma.vm_mm = &init_mm;
-
-	vaddr = (unsigned long)kvma->addr;
-	vma.vm_start = vaddr;
-	vma.vm_end = vaddr + lcdc.vram_size;
-
-	pgprot = pgprot_writecombine(pgprot_kernel);
-	if (io_remap_pfn_range(&vma, vaddr,
-			   lcdc.vram_phys >> PAGE_SHIFT,
-			   lcdc.vram_size, pgprot) < 0) {
-		dev_err(lcdc.fbdev->dev, "kernel mmap for FB memory failed\n");
-		return -EAGAIN;
-	}
-
-	lcdc.vram_virt = (void *)vaddr;
-
-	return 0;
-}
-
-static void unmap_kern(void)
-{
-	vunmap(lcdc.vram_virt);
-}
-
 static int alloc_palette_ram(void)
 {
-	lcdc.palette_virt = dma_alloc_writecombine(lcdc.fbdev->dev,
-		MAX_PALETTE_SIZE, &lcdc.palette_phys, GFP_KERNEL);
+	lcdc.palette_virt = dma_alloc_wc(lcdc.fbdev->dev, MAX_PALETTE_SIZE,
+					 &lcdc.palette_phys, GFP_KERNEL);
 	if (lcdc.palette_virt == NULL) {
 		dev_err(lcdc.fbdev->dev, "failed to alloc palette memory\n");
 		return -ENOMEM;
@@ -662,8 +612,8 @@ static int alloc_palette_ram(void)
 
 static void free_palette_ram(void)
 {
-	dma_free_writecombine(lcdc.fbdev->dev, MAX_PALETTE_SIZE,
-			lcdc.palette_virt, lcdc.palette_phys);
+	dma_free_wc(lcdc.fbdev->dev, MAX_PALETTE_SIZE, lcdc.palette_virt,
+		    lcdc.palette_phys);
 }
 
 static int alloc_fbmem(struct omapfb_mem_region *region)
@@ -679,8 +629,8 @@ static int alloc_fbmem(struct omapfb_mem_region *region)
 	if (region->size > frame_size)
 		frame_size = region->size;
 	lcdc.vram_size = frame_size;
-	lcdc.vram_virt = dma_alloc_writecombine(lcdc.fbdev->dev,
-			lcdc.vram_size, &lcdc.vram_phys, GFP_KERNEL);
+	lcdc.vram_virt = dma_alloc_wc(lcdc.fbdev->dev, lcdc.vram_size,
+				      &lcdc.vram_phys, GFP_KERNEL);
 	if (lcdc.vram_virt == NULL) {
 		dev_err(lcdc.fbdev->dev, "unable to allocate FB DMA memory\n");
 		return -ENOMEM;
@@ -697,14 +647,12 @@ static int alloc_fbmem(struct omapfb_mem_region *region)
 
 static void free_fbmem(void)
 {
-	dma_free_writecombine(lcdc.fbdev->dev, lcdc.vram_size,
-			      lcdc.vram_virt, lcdc.vram_phys);
+	dma_free_wc(lcdc.fbdev->dev, lcdc.vram_size, lcdc.vram_virt,
+		    lcdc.vram_phys);
 }
 
 static int setup_fbmem(struct omapfb_mem_desc *req_md)
 {
-	int r;
-
 	if (!req_md->region_cnt) {
 		dev_err(lcdc.fbdev->dev, "no memory regions defined\n");
 		return -EINVAL;
@@ -715,31 +663,7 @@ static int setup_fbmem(struct omapfb_mem_desc *req_md)
 		req_md->region_cnt = 1;
 	}
 
-	if (req_md->region[0].paddr == 0) {
-		lcdc.fbmem_allocated = 1;
-		if ((r = alloc_fbmem(&req_md->region[0])) < 0)
-			return r;
-		return 0;
-	}
-
-	lcdc.vram_phys = req_md->region[0].paddr;
-	lcdc.vram_size = req_md->region[0].size;
-
-	if ((r = mmap_kern()) < 0)
-		return r;
-
-	dev_dbg(lcdc.fbdev->dev, "vram at %08x size %08lx mapped to 0x%p\n",
-		 lcdc.vram_phys, lcdc.vram_size, lcdc.vram_virt);
-
-	return 0;
-}
-
-static void cleanup_fbmem(void)
-{
-	if (lcdc.fbmem_allocated)
-		free_fbmem();
-	else
-		unmap_kern();
+	return alloc_fbmem(&req_md->region[0]);
 }
 
 static int omap_lcdc_init(struct omapfb_device *fbdev, int ext_mode,
@@ -833,7 +757,7 @@ static void omap_lcdc_cleanup(void)
 {
 	if (!lcdc.ext_mode)
 		free_palette_ram();
-	cleanup_fbmem();
+	free_fbmem();
 	omap_free_lcd_dma();
 	free_irq(OMAP_LCDC_IRQ, lcdc.fbdev);
 	clk_disable(lcdc.lcd_ck);

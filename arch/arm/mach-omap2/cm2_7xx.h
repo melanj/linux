@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * DRA7xx CM2 instance offset macros
  *
@@ -13,16 +14,10 @@
  * with the public linux-omap@vger.kernel.org mailing list and the
  * authors above to ensure that the autogeneration scripts are kept
  * up-to-date with the file contents.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __ARCH_ARM_MACH_OMAP2_CM2_7XX_H
 #define __ARCH_ARM_MACH_OMAP2_CM2_7XX_H
-
-#include "cm_44xx_54xx.h"
 
 /* CM2 base address */
 #define DRA7XX_CM_CORE_BASE		0x4a008000
@@ -357,6 +352,10 @@
 #define DRA7XX_CM_L3INIT_SATA_CLKCTRL				DRA7XX_CM_CORE_REGADDR(DRA7XX_CM_CORE_L3INIT_INST, 0x0088)
 #define DRA7XX_CM_PCIE_CLKSTCTRL_OFFSET				0x00a0
 #define DRA7XX_CM_PCIE_STATICDEP_OFFSET				0x00a4
+#define DRA7XX_CM_L3INIT_PCIESS1_CLKCTRL_OFFSET			0x00b0
+#define DRA7XX_CM_L3INIT_PCIESS1_CLKCTRL			DRA7XX_CM_CORE_REGADDR(DRA7XX_CM_CORE_L3INIT_INST, 0x00b0)
+#define DRA7XX_CM_L3INIT_PCIESS2_CLKCTRL_OFFSET			0x00b8
+#define DRA7XX_CM_L3INIT_PCIESS2_CLKCTRL			DRA7XX_CM_CORE_REGADDR(DRA7XX_CM_CORE_L3INIT_INST, 0x00b8)
 #define DRA7XX_CM_GMAC_CLKSTCTRL_OFFSET				0x00c0
 #define DRA7XX_CM_GMAC_STATICDEP_OFFSET				0x00c4
 #define DRA7XX_CM_GMAC_DYNAMICDEP_OFFSET			0x00c8

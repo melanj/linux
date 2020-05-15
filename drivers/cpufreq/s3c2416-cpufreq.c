@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * S3C2416/2450 CPUfreq Support
  *
@@ -6,10 +7,6 @@
  * based on s3c64xx_cpufreq.c
  *
  * Copyright 2009 Wolfson Microelectronics plc
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -263,10 +260,10 @@ out:
 }
 
 #ifdef CONFIG_ARM_S3C2416_CPUFREQ_VCORESCALE
-static void __init s3c2416_cpufreq_cfg_regulator(struct s3c2416_data *s3c_freq)
+static void s3c2416_cpufreq_cfg_regulator(struct s3c2416_data *s3c_freq)
 {
 	int count, v, i, found;
-	struct cpufreq_frequency_table *freq;
+	struct cpufreq_frequency_table *pos;
 	struct s3c2416_dvfs *dvfs;
 
 	count = regulator_count_voltages(s3c_freq->vddarm);
@@ -275,12 +272,11 @@ static void __init s3c2416_cpufreq_cfg_regulator(struct s3c2416_data *s3c_freq)
 		return;
 	}
 
-	freq = s3c_freq->freq_table;
-	while (count > 0 && freq->frequency != CPUFREQ_TABLE_END) {
-		if (freq->frequency == CPUFREQ_ENTRY_INVALID)
-			continue;
+	if (!count)
+		goto out;
 
-		dvfs = &s3c2416_dvfs_table[freq->driver_data];
+	cpufreq_for_each_valid_entry(pos, s3c_freq->freq_table) {
+		dvfs = &s3c2416_dvfs_table[pos->driver_data];
 		found = 0;
 
 		/* Check only the min-voltage, more is always ok on S3C2416 */
@@ -292,13 +288,12 @@ static void __init s3c2416_cpufreq_cfg_regulator(struct s3c2416_data *s3c_freq)
 
 		if (!found) {
 			pr_debug("cpufreq: %dkHz unsupported by regulator\n",
-				 freq->frequency);
-			freq->frequency = CPUFREQ_ENTRY_INVALID;
+				 pos->frequency);
+			pos->frequency = CPUFREQ_ENTRY_INVALID;
 		}
-
-		freq++;
 	}
 
+out:
 	/* Guessed */
 	s3c_freq->regulator_latency = 1 * 1000 * 1000;
 }
@@ -309,6 +304,7 @@ static int s3c2416_cpufreq_reboot_notifier_evt(struct notifier_block *this,
 {
 	struct s3c2416_data *s3c_freq = &s3c2416_cpufreq;
 	int ret;
+	struct cpufreq_policy *policy;
 
 	mutex_lock(&cpufreq_lock);
 
@@ -323,7 +319,16 @@ static int s3c2416_cpufreq_reboot_notifier_evt(struct notifier_block *this,
 	 */
 	if (s3c_freq->is_dvs) {
 		pr_debug("cpufreq: leave dvs on reboot\n");
-		ret = cpufreq_driver_target(cpufreq_cpu_get(0), FREQ_SLEEP, 0);
+
+		policy = cpufreq_cpu_get(0);
+		if (!policy) {
+			pr_debug("cpufreq: get no policy for cpu0\n");
+			return NOTIFY_BAD;
+		}
+
+		ret = cpufreq_driver_target(policy, FREQ_SLEEP, 0);
+		cpufreq_cpu_put(policy);
+
 		if (ret < 0)
 			return NOTIFY_BAD;
 	}
@@ -335,10 +340,10 @@ static struct notifier_block s3c2416_cpufreq_reboot_notifier = {
 	.notifier_call = s3c2416_cpufreq_reboot_notifier_evt,
 };
 
-static int __init s3c2416_cpufreq_driver_init(struct cpufreq_policy *policy)
+static int s3c2416_cpufreq_driver_init(struct cpufreq_policy *policy)
 {
 	struct s3c2416_data *s3c_freq = &s3c2416_cpufreq;
-	struct cpufreq_frequency_table *freq;
+	struct cpufreq_frequency_table *pos;
 	struct clk *msysclk;
 	unsigned long rate;
 	int ret;
@@ -402,7 +407,6 @@ static int __init s3c2416_cpufreq_driver_init(struct cpufreq_policy *policy)
 	rate = clk_get_rate(s3c_freq->hclk);
 	if (rate < 133 * 1000 * 1000) {
 		pr_err("cpufreq: HCLK not at 133MHz\n");
-		clk_put(s3c_freq->hclk);
 		ret = -EINVAL;
 		goto err_armclk;
 	}
@@ -427,51 +431,42 @@ static int __init s3c2416_cpufreq_driver_init(struct cpufreq_policy *policy)
 	s3c_freq->regulator_latency = 0;
 #endif
 
-	freq = s3c_freq->freq_table;
-	while (freq->frequency != CPUFREQ_TABLE_END) {
+	cpufreq_for_each_entry(pos, s3c_freq->freq_table) {
 		/* special handling for dvs mode */
-		if (freq->driver_data == 0) {
+		if (pos->driver_data == 0) {
 			if (!s3c_freq->hclk) {
 				pr_debug("cpufreq: %dkHz unsupported as it would need unavailable dvs mode\n",
-					 freq->frequency);
-				freq->frequency = CPUFREQ_ENTRY_INVALID;
+					 pos->frequency);
+				pos->frequency = CPUFREQ_ENTRY_INVALID;
 			} else {
-				freq++;
 				continue;
 			}
 		}
 
 		/* Check for frequencies we can generate */
 		rate = clk_round_rate(s3c_freq->armdiv,
-				      freq->frequency * 1000);
+				      pos->frequency * 1000);
 		rate /= 1000;
-		if (rate != freq->frequency) {
+		if (rate != pos->frequency) {
 			pr_debug("cpufreq: %dkHz unsupported by clock (clk_round_rate return %lu)\n",
-				 freq->frequency, rate);
-			freq->frequency = CPUFREQ_ENTRY_INVALID;
+				pos->frequency, rate);
+			pos->frequency = CPUFREQ_ENTRY_INVALID;
 		}
-
-		freq++;
 	}
 
 	/* Datasheet says PLL stabalisation time must be at least 300us,
 	 * so but add some fudge. (reference in LOCKCON0 register description)
 	 */
-	ret = cpufreq_generic_init(policy, s3c_freq->freq_table,
+	cpufreq_generic_init(policy, s3c_freq->freq_table,
 			(500 * 1000) + s3c_freq->regulator_latency);
-	if (ret)
-		goto err_freq_table;
-
 	register_reboot_notifier(&s3c2416_cpufreq_reboot_notifier);
 
 	return 0;
 
-err_freq_table:
 #ifdef CONFIG_ARM_S3C2416_CPUFREQ_VCORESCALE
-	regulator_put(s3c_freq->vddarm);
 err_vddarm:
-#endif
 	clk_put(s3c_freq->armclk);
+#endif
 err_armclk:
 	clk_put(s3c_freq->hclk);
 err_hclk:

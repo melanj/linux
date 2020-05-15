@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ImgTec IR Decoder setup for Sharp protocol.
  *
@@ -7,7 +8,8 @@
 #include "img-ir-hw.h"
 
 /* Convert Sharp data to a scancode */
-static int img_ir_sharp_scancode(int len, u64 raw, int *scancode, u64 protocols)
+static int img_ir_sharp_scancode(int len, u64 raw, u64 enabled_protocols,
+				 struct img_ir_scancode_req *request)
 {
 	unsigned int addr, cmd, exp, chk;
 
@@ -26,7 +28,8 @@ static int img_ir_sharp_scancode(int len, u64 raw, int *scancode, u64 protocols)
 		/* probably the second half of the message */
 		return -EINVAL;
 
-	*scancode = addr << 8 | cmd;
+	request->protocol = RC_PROTO_SHARP;
+	request->scancode = addr << 8 | cmd;
 	return IMG_IR_SCANCODE;
 }
 
@@ -66,7 +69,7 @@ static int img_ir_sharp_filter(const struct rc_scancode_filter *in,
  * See also http://www.sbprojects.com/knowledge/ir/sharp.php
  */
 struct img_ir_decoder img_ir_sharp = {
-	.type = RC_BIT_SHARP,
+	.type = RC_PROTO_BIT_SHARP,
 	.control = {
 		.decoden = 0,
 		.decodend2 = 1,

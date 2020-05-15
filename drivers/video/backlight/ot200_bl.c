@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Bachmann electronic GmbH
  *	Christian Gmeiner <christian.gmeiner@gmail.com>
  *
  * Backlight driver for ot200 visualisation device from
  * Bachmann electronic GmbH.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -152,7 +149,6 @@ static int ot200_backlight_remove(struct platform_device *pdev)
 static struct platform_driver ot200_backlight_driver = {
 	.driver		= {
 		.name	= "ot200-backlight",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ot200_backlight_probe,
 	.remove		= ot200_backlight_remove,

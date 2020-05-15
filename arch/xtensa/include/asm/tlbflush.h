@@ -36,6 +36,7 @@ void local_flush_tlb_page(struct vm_area_struct *vma,
 		unsigned long page);
 void local_flush_tlb_range(struct vm_area_struct *vma,
 		unsigned long start, unsigned long end);
+void local_flush_tlb_kernel_range(unsigned long start, unsigned long end);
 
 #ifdef CONFIG_SMP
 
@@ -44,12 +45,7 @@ void flush_tlb_mm(struct mm_struct *);
 void flush_tlb_page(struct vm_area_struct *, unsigned long);
 void flush_tlb_range(struct vm_area_struct *, unsigned long,
 		unsigned long);
-
-static inline void flush_tlb_kernel_range(unsigned long start,
-		unsigned long end)
-{
-	flush_tlb_all();
-}
+void flush_tlb_kernel_range(unsigned long start, unsigned long end);
 
 #else /* !CONFIG_SMP */
 
@@ -58,7 +54,8 @@ static inline void flush_tlb_kernel_range(unsigned long start,
 #define flush_tlb_page(vma, page)	   local_flush_tlb_page(vma, page)
 #define flush_tlb_range(vma, vmaddr, end)  local_flush_tlb_range(vma, vmaddr, \
 								 end)
-#define flush_tlb_kernel_range(start, end) local_flush_tlb_all()
+#define flush_tlb_kernel_range(start, end) local_flush_tlb_kernel_range(start, \
+									end)
 
 #endif /* CONFIG_SMP */
 
@@ -162,9 +159,6 @@ static inline void invalidate_dtlb_mapping (unsigned address)
 	if (((tlb_entry = dtlb_probe(address)) & (1 << DTLB_HIT_BIT)) != 0)
 		invalidate_dtlb_entry(tlb_entry);
 }
-
-#define check_pgt_cache()	do { } while (0)
-
 
 /*
  * DO NOT USE THESE FUNCTIONS.  These instructions aren't part of the Xtensa

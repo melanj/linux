@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TCP HYBLA
  *
@@ -28,7 +29,6 @@ struct hybla {
 static int rtt0 = 25;
 module_param(rtt0, int, 0644);
 MODULE_PARM_DESC(rtt0, "reference rout trip time (ms)");
-
 
 /* This is called to refresh values for hybla parameters */
 static inline void hybla_recalc_param (struct sock *sk)
@@ -87,8 +87,7 @@ static inline u32 hybla_fraction(u32 odds)
  *     o Give cwnd a new value based on the model proposed
  *     o remember increments <1
  */
-static void hybla_cong_avoid(struct sock *sk, u32 ack, u32 acked,
-			     u32 in_flight)
+static void hybla_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct hybla *ca = inet_csk_ca(sk);
@@ -101,11 +100,11 @@ static void hybla_cong_avoid(struct sock *sk, u32 ack, u32 acked,
 		ca->minrtt_us = tp->srtt_us;
 	}
 
-	if (!tcp_is_cwnd_limited(sk, in_flight))
+	if (!tcp_is_cwnd_limited(sk))
 		return;
 
 	if (!ca->hybla_en) {
-		tcp_reno_cong_avoid(sk, ack, acked, in_flight);
+		tcp_reno_cong_avoid(sk, ack, acked);
 		return;
 	}
 
@@ -114,7 +113,7 @@ static void hybla_cong_avoid(struct sock *sk, u32 ack, u32 acked,
 
 	rho_fractions = ca->rho_3ls - (ca->rho << 3);
 
-	if (tp->snd_cwnd < tp->snd_ssthresh) {
+	if (tcp_in_slow_start(tp)) {
 		/*
 		 * slow start
 		 *      INC = 2^RHO - 1
@@ -168,6 +167,7 @@ static void hybla_cong_avoid(struct sock *sk, u32 ack, u32 acked,
 static struct tcp_congestion_ops tcp_hybla __read_mostly = {
 	.init		= hybla_init,
 	.ssthresh	= tcp_reno_ssthresh,
+	.undo_cwnd	= tcp_reno_undo_cwnd,
 	.cong_avoid	= hybla_cong_avoid,
 	.set_state	= hybla_state,
 

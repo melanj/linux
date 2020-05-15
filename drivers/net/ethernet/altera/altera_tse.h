@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Altera Triple-Speed Ethernet MAC driver
  * Copyright (C) 2008-2014 Altera Corporation. All rights reserved
  *
@@ -14,18 +15,6 @@
  *
  * Original driver contributed by SLS.
  * Major updates contributed by GlobalLogic
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ALTERA_TSE_H__
@@ -57,6 +46,8 @@
 
 /* MAC function configuration default settings */
 #define ALTERA_TSE_TX_IPG_LENGTH	12
+
+#define ALTERA_TSE_PAUSE_QUANTA		0xffff
 
 #define GET_BIT_VALUE(v, bit)		(((v) >> (bit)) & 0x1)
 
@@ -117,6 +108,17 @@
 #define MAC_CMDCFG_RX_ERR_DISC_GET(v)		GET_BIT_VALUE(v, 26)
 #define MAC_CMDCFG_DISABLE_READ_TIMEOUT_GET(v)	GET_BIT_VALUE(v, 27)
 #define MAC_CMDCFG_CNT_RESET_GET(v)		GET_BIT_VALUE(v, 31)
+
+/* SGMII PCS register addresses
+ */
+#define SGMII_PCS_SCRATCH	0x10
+#define SGMII_PCS_REV		0x11
+#define SGMII_PCS_LINK_TIMER_0	0x12
+#define SGMII_PCS_LINK_TIMER_1	0x13
+#define SGMII_PCS_IF_MODE	0x14
+#define SGMII_PCS_DIS_READ_TO	0x15
+#define SGMII_PCS_READ_TO	0x16
+#define SGMII_PCS_SW_RESET_TIMEOUT 100 /* usecs */
 
 /* MDIO registers within MAC register Space
  */
@@ -355,6 +357,8 @@ struct altera_tse_mac {
 	u32 reserved5[42];
 };
 
+#define tse_csroffs(a) (offsetof(struct altera_tse_mac, a))
+
 /* Transmit and Receive Command Registers Bit Definitions
  */
 #define ALTERA_TSE_TX_CMD_STAT_OMIT_CRC		BIT(17)
@@ -390,10 +394,11 @@ struct altera_dmaops {
 	void (*clear_rxirq)(struct altera_tse_private *);
 	int (*tx_buffer)(struct altera_tse_private *, struct tse_buffer *);
 	u32 (*tx_completions)(struct altera_tse_private *);
-	int (*add_rx_desc)(struct altera_tse_private *, struct tse_buffer *);
+	void (*add_rx_desc)(struct altera_tse_private *, struct tse_buffer *);
 	u32 (*get_rx_status)(struct altera_tse_private *);
 	int (*init_dma)(struct altera_tse_private *);
 	void (*uninit_dma)(struct altera_tse_private *);
+	void (*start_rxdma)(struct altera_tse_private *);
 };
 
 /* This structure is private to each device.
@@ -438,7 +443,6 @@ struct altera_tse_private {
 	/* RX/TX MAC FIFO configs */
 	u32 tx_fifo_depth;
 	u32 rx_fifo_depth;
-	u32 max_mtu;
 
 	/* Hash filter settings */
 	u32 hash_filter;
@@ -468,7 +472,6 @@ struct altera_tse_private {
 	int phy_addr;		/* PHY's MDIO address, -1 for autodetection */
 	phy_interface_t phy_iface;
 	struct mii_bus *mdio;
-	struct phy_device *phydev;
 	int oldspeed;
 	int oldduplex;
 	int oldlink;
@@ -482,5 +485,50 @@ struct altera_tse_private {
 /* Function prototypes
  */
 void altera_tse_set_ethtool_ops(struct net_device *);
+
+static inline
+u32 csrrd32(void __iomem *mac, size_t offs)
+{
+	void __iomem *paddr = (void __iomem *)((uintptr_t)mac + offs);
+	return readl(paddr);
+}
+
+static inline
+u16 csrrd16(void __iomem *mac, size_t offs)
+{
+	void __iomem *paddr = (void __iomem *)((uintptr_t)mac + offs);
+	return readw(paddr);
+}
+
+static inline
+u8 csrrd8(void __iomem *mac, size_t offs)
+{
+	void __iomem *paddr = (void __iomem *)((uintptr_t)mac + offs);
+	return readb(paddr);
+}
+
+static inline
+void csrwr32(u32 val, void __iomem *mac, size_t offs)
+{
+	void __iomem *paddr = (void __iomem *)((uintptr_t)mac + offs);
+
+	writel(val, paddr);
+}
+
+static inline
+void csrwr16(u16 val, void __iomem *mac, size_t offs)
+{
+	void __iomem *paddr = (void __iomem *)((uintptr_t)mac + offs);
+
+	writew(val, paddr);
+}
+
+static inline
+void csrwr8(u8 val, void __iomem *mac, size_t offs)
+{
+	void __iomem *paddr = (void __iomem *)((uintptr_t)mac + offs);
+
+	writeb(val, paddr);
+}
 
 #endif /* __ALTERA_TSE_H__ */

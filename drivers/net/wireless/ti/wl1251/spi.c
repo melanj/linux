@@ -1,28 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1251
  *
  * Copyright (C) 2008 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/swab.h>
 #include <linux/crc7.h>
 #include <linux/spi/spi.h>
 #include <linux/wl12xx.h>
@@ -83,47 +70,44 @@ static void wl1251_spi_reset(struct wl1251 *wl)
 
 static void wl1251_spi_wake(struct wl1251 *wl)
 {
-	u8 crc[WSPI_INIT_CMD_CRC_LEN], *cmd;
 	struct spi_transfer t;
 	struct spi_message m;
+	u8 *cmd = kzalloc(WSPI_INIT_CMD_LEN, GFP_KERNEL);
 
-	cmd = kzalloc(WSPI_INIT_CMD_LEN, GFP_KERNEL);
 	if (!cmd) {
 		wl1251_error("could not allocate cmd for spi init");
 		return;
 	}
 
-	memset(crc, 0, sizeof(crc));
 	memset(&t, 0, sizeof(t));
 	spi_message_init(&m);
 
 	/* Set WSPI_INIT_COMMAND
 	 * the data is being send from the MSB to LSB
 	 */
-	cmd[2] = 0xff;
-	cmd[3] = 0xff;
-	cmd[1] = WSPI_INIT_CMD_START | WSPI_INIT_CMD_TX;
-	cmd[0] = 0;
-	cmd[7] = 0;
-	cmd[6] |= HW_ACCESS_WSPI_INIT_CMD_MASK << 3;
-	cmd[6] |= HW_ACCESS_WSPI_FIXED_BUSY_LEN & WSPI_INIT_CMD_FIXEDBUSY_LEN;
+	cmd[0] = 0xff;
+	cmd[1] = 0xff;
+	cmd[2] = WSPI_INIT_CMD_START | WSPI_INIT_CMD_TX;
+	cmd[3] = 0;
+	cmd[4] = 0;
+	cmd[5] = HW_ACCESS_WSPI_INIT_CMD_MASK << 3;
+	cmd[5] |= HW_ACCESS_WSPI_FIXED_BUSY_LEN & WSPI_INIT_CMD_FIXEDBUSY_LEN;
 
-	if (HW_ACCESS_WSPI_FIXED_BUSY_LEN == 0)
-		cmd[5] |=  WSPI_INIT_CMD_DIS_FIXEDBUSY;
-	else
-		cmd[5] |= WSPI_INIT_CMD_EN_FIXEDBUSY;
-
-	cmd[5] |= WSPI_INIT_CMD_IOD | WSPI_INIT_CMD_IP | WSPI_INIT_CMD_CS
+	cmd[6] = WSPI_INIT_CMD_IOD | WSPI_INIT_CMD_IP | WSPI_INIT_CMD_CS
 		| WSPI_INIT_CMD_WSPI | WSPI_INIT_CMD_WS;
 
-	crc[0] = cmd[1];
-	crc[1] = cmd[0];
-	crc[2] = cmd[7];
-	crc[3] = cmd[6];
-	crc[4] = cmd[5];
+	if (HW_ACCESS_WSPI_FIXED_BUSY_LEN == 0)
+		cmd[6] |= WSPI_INIT_CMD_DIS_FIXEDBUSY;
+	else
+		cmd[6] |= WSPI_INIT_CMD_EN_FIXEDBUSY;
 
-	cmd[4] |= crc7(0, crc, WSPI_INIT_CMD_CRC_LEN) << 1;
-	cmd[4] |= WSPI_INIT_CMD_END;
+	cmd[7] = crc7_be(0, cmd+2, WSPI_INIT_CMD_CRC_LEN) | WSPI_INIT_CMD_END;
+	/*
+	 * The above is the logical order; it must actually be stored
+	 * in the buffer byte-swapped.
+	 */
+	__swab32s((u32 *)cmd);
+	__swab32s((u32 *)cmd+1);
 
 	t.tx_buf = cmd;
 	t.len = WSPI_INIT_CMD_LEN;
@@ -347,7 +331,6 @@ static int wl1251_spi_remove(struct spi_device *spi)
 {
 	struct wl1251 *wl = spi_get_drvdata(spi);
 
-	free_irq(wl->irq, wl);
 	wl1251_free_hw(wl);
 	regulator_disable(wl->vio);
 
@@ -357,7 +340,6 @@ static int wl1251_spi_remove(struct spi_device *spi)
 static struct spi_driver wl1251_spi_driver = {
 	.driver = {
 		.name		= DRIVER_NAME,
-		.owner		= THIS_MODULE,
 	},
 
 	.probe		= wl1251_spi_probe,

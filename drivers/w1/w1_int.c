@@ -1,22 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- *	w1_int.c
- *
  * Copyright (c) 2004 Evgeniy Polyakov <zbr@ioremap.net>
- *
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/kernel.h>
@@ -24,13 +8,12 @@
 #include <linux/delay.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 #include <linux/export.h>
 #include <linux/moduleparam.h>
 
-#include "w1.h"
-#include "w1_log.h"
+#include "w1_internal.h"
 #include "w1_netlink.h"
-#include "w1_int.h"
 
 static int w1_search_count = -1; /* Default is continual scan */
 module_param_named(search_count, w1_search_count, int, 0);
@@ -38,7 +21,7 @@ module_param_named(search_count, w1_search_count, int, 0);
 static int w1_enable_pullup = 1;
 module_param_named(enable_pullup, w1_enable_pullup, int, 0);
 
-static struct w1_master * w1_alloc_dev(u32 id, int slave_count, int slave_ttl,
+static struct w1_master *w1_alloc_dev(u32 id, int slave_count, int slave_ttl,
 				       struct device_driver *driver,
 				       struct device *device)
 {
@@ -50,8 +33,7 @@ static struct w1_master * w1_alloc_dev(u32 id, int slave_count, int slave_ttl,
 	 */
 	dev = kzalloc(sizeof(struct w1_master) + sizeof(struct w1_bus_master), GFP_KERNEL);
 	if (!dev) {
-		printk(KERN_ERR
-			"Failed to allocate %zd bytes for new w1 device.\n",
+		pr_err("Failed to allocate %zd bytes for new w1 device.\n",
 			sizeof(struct w1_master));
 		return NULL;
 	}
@@ -91,9 +73,8 @@ static struct w1_master * w1_alloc_dev(u32 id, int slave_count, int slave_ttl,
 
 	err = device_register(&dev->dev);
 	if (err) {
-		printk(KERN_ERR "Failed to register master device. err=%d\n", err);
-		memset(dev, 0, sizeof(struct w1_master));
-		kfree(dev);
+		pr_err("Failed to register master device. err=%d\n", err);
+		put_device(&dev->dev);
 		dev = NULL;
 	}
 
@@ -116,13 +97,13 @@ int w1_add_master_device(struct w1_bus_master *master)
 	struct w1_netlink_msg msg;
 	int id, found;
 
-        /* validate minimum functionality */
-        if (!(master->touch_bit && master->reset_bus) &&
-            !(master->write_bit && master->read_bit) &&
+	/* validate minimum functionality */
+	if (!(master->touch_bit && master->reset_bus) &&
+	    !(master->write_bit && master->read_bit) &&
 	    !(master->write_byte && master->read_byte && master->reset_bus)) {
-		printk(KERN_ERR "w1_add_master_device: invalid function set\n");
+		pr_err("w1_add_master_device: invalid function set\n");
 		return(-EINVAL);
-        }
+	}
 
 	/* Lock until the device is added (or not) to w1_masters. */
 	mutex_lock(&w1_mlock);
@@ -188,6 +169,7 @@ err_out_free_dev:
 
 	return retval;
 }
+EXPORT_SYMBOL(w1_add_master_device);
 
 void __w1_remove_master_device(struct w1_master *dev)
 {
@@ -219,9 +201,13 @@ void __w1_remove_master_device(struct w1_master *dev)
 
 		if (msleep_interruptible(1000))
 			flush_signals(current);
+		mutex_lock(&dev->list_mutex);
 		w1_process_callbacks(dev);
+		mutex_unlock(&dev->list_mutex);
 	}
+	mutex_lock(&dev->list_mutex);
 	w1_process_callbacks(dev);
+	mutex_unlock(&dev->list_mutex);
 
 	memset(&msg, 0, sizeof(msg));
 	msg.id.mst.id = dev->id;
@@ -250,12 +236,10 @@ void w1_remove_master_device(struct w1_bus_master *bm)
 	}
 
 	if (!found) {
-		printk(KERN_ERR "Device doesn't exist.\n");
+		pr_err("Device doesn't exist.\n");
 		return;
 	}
 
 	__w1_remove_master_device(found);
 }
-
-EXPORT_SYMBOL(w1_add_master_device);
 EXPORT_SYMBOL(w1_remove_master_device);

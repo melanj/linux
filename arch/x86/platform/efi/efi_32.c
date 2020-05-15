@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Extensible Firmware Interface
  *
@@ -33,19 +34,29 @@
 
 /*
  * To make EFI call EFI runtime service in physical addressing mode we need
- * prelog/epilog before/after the invocation to disable interrupt, to
- * claim EFI runtime service handler exclusively and to duplicate a memory in
- * low memory space say 0 - 3G.
+ * prolog/epilog before/after the invocation to claim the EFI runtime service
+ * handler exclusively and to duplicate a memory mapping in low memory space,
+ * say 0 - 3G.
  */
-static unsigned long efi_rt_eflags;
 
-void efi_sync_low_kernel_mappings(void) {}
-void __init efi_dump_pagetable(void) {}
-int efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
+int __init efi_alloc_page_tables(void)
 {
 	return 0;
 }
-void efi_cleanup_page_tables(unsigned long pa_memmap, unsigned num_pages) {}
+
+void efi_sync_low_kernel_mappings(void) {}
+
+void __init efi_dump_pagetable(void)
+{
+#ifdef CONFIG_EFI_PGT_DUMP
+	ptdump_walk_pgd_level(NULL, &init_mm);
+#endif
+}
+
+int __init efi_setup_page_tables(unsigned long pa_memmap, unsigned num_pages)
+{
+	return 0;
+}
 
 void __init efi_map_region(efi_memory_desc_t *md)
 {
@@ -55,35 +66,46 @@ void __init efi_map_region(efi_memory_desc_t *md)
 void __init efi_map_region_fixed(efi_memory_desc_t *md) {}
 void __init parse_efi_setup(u64 phys_addr, u32 data_len) {}
 
-void efi_call_phys_prelog(void)
+efi_status_t efi_call_svam(efi_runtime_services_t * const *,
+			   u32, u32, u32, void *, u32);
+
+efi_status_t __init efi_set_virtual_address_map(unsigned long memory_map_size,
+						unsigned long descriptor_size,
+						u32 descriptor_version,
+						efi_memory_desc_t *virtual_map,
+						unsigned long systab_phys)
 {
+	const efi_system_table_t *systab = (efi_system_table_t *)systab_phys;
 	struct desc_ptr gdt_descr;
+	efi_status_t status;
+	unsigned long flags;
+	pgd_t *save_pgd;
 
-	local_irq_save(efi_rt_eflags);
-
+	/* Current pgd is swapper_pg_dir, we'll restore it later: */
+	save_pgd = swapper_pg_dir;
 	load_cr3(initial_page_table);
 	__flush_tlb_all();
 
-	gdt_descr.address = __pa(get_cpu_gdt_table(0));
-	gdt_descr.size = GDT_SIZE - 1;
-	load_gdt(&gdt_descr);
-}
-
-void efi_call_phys_epilog(void)
-{
-	struct desc_ptr gdt_descr;
-
-	gdt_descr.address = (unsigned long)get_cpu_gdt_table(0);
+	gdt_descr.address = get_cpu_gdt_paddr(0);
 	gdt_descr.size = GDT_SIZE - 1;
 	load_gdt(&gdt_descr);
 
-	load_cr3(swapper_pg_dir);
+	/* Disable interrupts around EFI calls: */
+	local_irq_save(flags);
+	status = efi_call_svam(&systab->runtime,
+			       memory_map_size, descriptor_size,
+			       descriptor_version, virtual_map,
+			       __pa(&efi.runtime));
+	local_irq_restore(flags);
+
+	load_fixmap_gdt(0);
+	load_cr3(save_pgd);
 	__flush_tlb_all();
 
-	local_irq_restore(efi_rt_eflags);
+	return status;
 }
 
-void __init efi_runtime_mkexec(void)
+void __init efi_runtime_update_mappings(void)
 {
 	if (__supported_pte_mask & _PAGE_NX)
 		runtime_code_page_mkexec();

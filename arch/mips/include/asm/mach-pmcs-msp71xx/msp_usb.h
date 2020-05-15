@@ -1,22 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /******************************************************************
  * Copyright (c) 2000-2007 PMC-Sierra INC.
- *
- *     This program is free software; you can redistribute it
- *     and/or modify it under the terms of the GNU General
- *     Public License as published by the Free Software
- *     Foundation; either version 2 of the License, or (at your
- *     option) any later version.
- *
- *     This program is distributed in the hope that it will be
- *     useful, but WITHOUT ANY WARRANTY; without even the implied
- *     warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- *     PURPOSE.  See the GNU General Public License for more
- *     details.
- *
- *     You should have received a copy of the GNU General Public
- *     License along with this program; if not, write to the Free
- *     Software Foundation, Inc., 675 Mass Ave, Cambridge, MA
- *     02139, USA.
  *
  * PMC-SIERRA INC. DISCLAIMS ANY LIABILITY OF ANY KIND
  * FOR ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS
@@ -25,11 +9,7 @@
 #ifndef MSP_USB_H_
 #define MSP_USB_H_
 
-#ifdef CONFIG_MSP_HAS_DUAL_USB
-#define NUM_USB_DEVS   2
-#else
 #define NUM_USB_DEVS   1
-#endif
 
 /* Register spaces for USB host 0 */
 #define MSP_USB0_MAB_START	(MSP_USB0_BASE + 0x0)

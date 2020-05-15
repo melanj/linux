@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2011 Samsung Electronics Co., Ltd.
  * MyungJoo.Ham <myungjoo.ham@samsung.com>
@@ -7,9 +8,6 @@
  * monitor charging even in the context of suspend-to-RAM with
  * an interface combining the chargers.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
 **/
 
 #ifndef _CHARGER_MANAGER_H
@@ -17,6 +15,7 @@
 
 #include <linux/power_supply.h>
 #include <linux/extcon.h>
+#include <linux/alarmtimer.h>
 
 enum data_source {
 	CM_BATTERY_PRESENT,
@@ -45,29 +44,6 @@ enum cm_event_types {
 };
 
 /**
- * struct charger_global_desc
- * @rtc_name: the name of RTC used to wake up the system from suspend.
- * @rtc_only_wakeup:
- *	If the system is woken up by waekup-sources other than the RTC or
- *	callbacks, Charger Manager should recognize with
- *	rtc_only_wakeup() returning false.
- *	If the RTC given to CM is the only wakeup reason,
- *	rtc_only_wakeup should return true.
- * @assume_timer_stops_in_suspend:
- *	Assume that the jiffy timer stops in suspend-to-RAM.
- *	When enabled, CM does not rely on jiffies value in
- *	suspend_again and assumes that jiffies value does not
- *	change during suspend.
- */
-struct charger_global_desc {
-	char *rtc_name;
-
-	bool (*rtc_only_wakeup)(void);
-
-	bool assume_timer_stops_in_suspend;
-};
-
-/**
  * struct charger_cable
  * @extcon_name: the name of extcon device.
  * @name: the name of charger cable(external connector).
@@ -87,7 +63,7 @@ struct charger_cable {
 	const char *extcon_name;
 	const char *name;
 
-	/* The charger-manager use Exton framework*/
+	/* The charger-manager use Extcon framework */
 	struct extcon_specific_cable_nb extcon_dev;
 	struct work_struct wq;
 	struct notifier_block nb;
@@ -116,7 +92,7 @@ struct charger_cable {
  *	the charger will be maintained with disabled state.
  * @cables:
  *	the array of charger cables to enable/disable charger
- *	and set current limit according to constratint data of
+ *	and set current limit according to constraint data of
  *	struct charger_cable if only charger cable included
  *	in the array of charger cables is attached/detached.
  * @num_cables: the number of charger cables.
@@ -141,7 +117,7 @@ struct charger_regulator {
 	struct charger_cable *cables;
 	int num_cables;
 
-	struct attribute_group attr_g;
+	struct attribute_group attr_grp;
 	struct device_attribute attr_name;
 	struct device_attribute attr_state;
 	struct device_attribute attr_externally_control;
@@ -170,7 +146,7 @@ struct charger_regulator {
  * @polling_interval_ms: interval in millisecond at which
  *	charger manager will monitor battery health
  * @battery_present:
- *	Specify where information for existance of battery can be obtained
+ *	Specify where information for existence of battery can be obtained
  * @psy_charger_stat: the names of power-supply for chargers
  * @num_charger_regulator: the number of entries in charger_regulators
  * @charger_regulators: array of charger regulators
@@ -178,7 +154,7 @@ struct charger_regulator {
  * @thermal_zone : the name of thermal zone for battery
  * @temp_min : Minimum battery temperature for charging.
  * @temp_max : Maximum battery temperature for charging.
- * @temp_diff : Temperature diffential to restart charging.
+ * @temp_diff : Temperature difference to restart charging.
  * @measure_battery_temp:
  *	true: measure battery temperature
  *	false: measure ambient temperature
@@ -208,6 +184,7 @@ struct charger_desc {
 
 	int num_charger_regulators;
 	struct charger_regulator *charger_regulators;
+	const struct attribute_group **sysfs_groups;
 
 	const char *psy_fuel_gauge;
 
@@ -253,9 +230,6 @@ struct charger_manager {
 	struct device *dev;
 	struct charger_desc *desc;
 
-	struct power_supply *fuel_gauge;
-	struct power_supply **charger_stat;
-
 #ifdef CONFIG_THERMAL
 	struct thermal_zone_device *tzd_batt;
 #endif
@@ -267,24 +241,17 @@ struct charger_manager {
 	int emergency_stop;
 
 	char psy_name_buf[PSY_NAME_MAX + 1];
-	struct power_supply charger_psy;
-
-	bool status_save_ext_pwr_inserted;
-	bool status_save_batt;
+	struct power_supply_desc charger_psy_desc;
+	struct power_supply *charger_psy;
 
 	u64 charging_start_time;
 	u64 charging_end_time;
 };
 
-#ifdef CONFIG_CHARGER_MANAGER
-extern int setup_charger_manager(struct charger_global_desc *gd);
-extern bool cm_suspend_again(void);
+#if IS_ENABLED(CONFIG_CHARGER_MANAGER)
 extern void cm_notify_event(struct power_supply *psy,
 				enum cm_event_types type, char *msg);
 #else
-static inline int setup_charger_manager(struct charger_global_desc *gd)
-{ return 0; }
-static inline bool cm_suspend_again(void) { return false; }
 static inline void cm_notify_event(struct power_supply *psy,
 				enum cm_event_types type, char *msg) { }
 #endif

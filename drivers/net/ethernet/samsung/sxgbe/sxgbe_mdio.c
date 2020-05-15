@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* 10G controller driver for Samsung SoCs
  *
  * Copyright (C) 2013 Samsung Electronics Co., Ltd.
  *		http://www.samsung.com
  *
  * Author: Siva Reddy Kallam <siva.kallam@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -27,7 +24,7 @@
 #define SXGBE_SMA_PREAD_CMD	0x02 /* post read  increament address */
 #define SXGBE_SMA_READ_CMD	0x03 /* read command */
 #define SXGBE_SMA_SKIP_ADDRFRM	0x00040000 /* skip the address frame */
-#define SXGBE_MII_BUSY		0x00800000 /* mii busy */
+#define SXGBE_MII_BUSY		0x00400000 /* mii busy */
 
 static int sxgbe_mdio_busy_wait(void __iomem *ioaddr, unsigned int mii_data)
 {
@@ -147,6 +144,7 @@ int sxgbe_mdio_register(struct net_device *ndev)
 	struct sxgbe_mdio_bus_data *mdio_data = priv->plat->mdio_bus_data;
 	int err, phy_addr;
 	int *irqlist;
+	bool phy_found = false;
 	bool act;
 
 	/* allocate the new mdio bus */
@@ -162,7 +160,7 @@ int sxgbe_mdio_register(struct net_device *ndev)
 		irqlist = priv->mii_irq;
 
 	/* assign mii bus fields */
-	mdio_bus->name = "samsxgbe";
+	mdio_bus->name = "sxgbe";
 	mdio_bus->read = &sxgbe_mdio_read;
 	mdio_bus->write = &sxgbe_mdio_write;
 	snprintf(mdio_bus->id, MII_BUS_ID_SIZE, "%s-%x",
@@ -179,7 +177,7 @@ int sxgbe_mdio_register(struct net_device *ndev)
 	}
 
 	for (phy_addr = 0; phy_addr < PHY_MAX_ADDR; phy_addr++) {
-		struct phy_device *phy = mdio_bus->phy_map[phy_addr];
+		struct phy_device *phy = mdiobus_get_phy(mdio_bus, phy_addr);
 
 		if (phy) {
 			char irq_num[4];
@@ -215,14 +213,23 @@ int sxgbe_mdio_register(struct net_device *ndev)
 			}
 			netdev_info(ndev, "PHY ID %08x at %d IRQ %s (%s)%s\n",
 				    phy->phy_id, phy_addr, irq_str,
-				    dev_name(&phy->dev), act ? " active" : "");
+				    phydev_name(phy), act ? " active" : "");
+			phy_found = true;
 		}
+	}
+
+	if (!phy_found) {
+		netdev_err(ndev, "PHY not found\n");
+		goto phyfound_err;
 	}
 
 	priv->mii = mdio_bus;
 
 	return 0;
 
+phyfound_err:
+	err = -ENODEV;
+	mdiobus_unregister(mdio_bus);
 mdiobus_err:
 	mdiobus_free(mdio_bus);
 	return err;
