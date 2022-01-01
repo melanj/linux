@@ -27,6 +27,7 @@
  */
 
 #include "gem/i915_gem_context.h"
+#include "gt/intel_gt.h"
 #include "gt/intel_gt_requests.h"
 
 #include "i915_drv.h"
@@ -59,6 +60,17 @@ mark_free(struct drm_mm_scan *scan,
 
 	list_add(&vma->evict_link, unwind);
 	return drm_mm_scan_add_block(scan, &vma->node);
+}
+
+static bool defer_evict(struct i915_vma *vma)
+{
+	if (i915_vma_is_active(vma))
+		return true;
+
+	if (i915_vma_is_scanout(vma))
+		return true;
+
+	return false;
 }
 
 /**
@@ -150,7 +162,7 @@ search_again:
 		 * To notice when we complete one full cycle, we record the
 		 * first active element seen, before moving it to the tail.
 		 */
-		if (active != ERR_PTR(-EAGAIN) && i915_vma_is_active(vma)) {
+		if (active != ERR_PTR(-EAGAIN) && defer_evict(vma)) {
 			if (!active)
 				active = vma;
 
@@ -226,14 +238,19 @@ found:
 
 	while (ret == 0 && (node = drm_mm_scan_color_evict(&scan))) {
 		vma = container_of(node, struct i915_vma, node);
-		ret = __i915_vma_unbind(vma);
+
+		/* If we find any non-objects (!vma), we cannot evict them */
+		if (vma->node.color != I915_COLOR_UNEVICTABLE)
+			ret = __i915_vma_unbind(vma);
+		else
+			ret = -ENOSPC; /* XXX search failed, try again? */
 	}
 
 	return ret;
 }
 
 /**
- * i915_gem_evict_for_vma - Evict vmas to make room for binding a new one
+ * i915_gem_evict_for_node - Evict vmas to make room for binding a new one
  * @vm: address space to evict from
  * @target: range (and color) to evict for
  * @flags: additional flags to control the eviction algorithm
